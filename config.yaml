@@ -1,0 +1,55 @@
+# Locking-Parameter Optimization Configuration
+#
+# Two approaches, switchable via locking.approach:
+#
+# Approach 1 (F=always true):
+#   Every loop: D -> surrogate -> L -> sim -> L* -> retrain (per R switch)
+#   R switch controls retrain frequency via locking.retrain_every
+#
+# Approach 2 (R=always true):
+#   Algorithm runs inner surrogate-only loop, then returns D_opt for sim.
+#   Retrains every loop. Inner steps controlled by algorithm.params.inner_steps.
+
+seed: 42
+max_loops: 10
+
+# Locking-specific settings
+locking:
+  approach: 1         # 1 or 2 (see above)
+  retrain_every: 3    # R switch for approach 1: retrain every N loops (1 = always)
+
+checkpoint:
+  dir: 'checkpoints_ligo'
+  freq: 1
+
+training:
+  mode: 'finetune'
+  checkpoint_mode: 'final'
+
+# Single oracle: the locking simulation (D -> L*)
+oracles:
+  - name: "locking"
+    input_dim: 4       # Design parameter dimensionality
+    n_initial: 200     # Initial random samples
+
+    function:
+      class: oracle    # Set programmatically in run.py (oracle is a class instance)
+
+    model:
+      class: 'DummyModel'   # Replace with DANetModel for real use
+      # For DANetModel:
+      # class: 'DANetModel'
+      # params:
+      #   epochs: 100
+      #   epochs_iter: 10
+      #   n_neur: 400
+      #   weight_new_data: 10.0
+
+algorithm:
+  class: algo          # Set programmatically in run.py
+  params:
+    input_dims: [4]
+    n_propose: 5
+    n_candidates: 500
+    approach: 1        # Must match locking.approach
+    inner_steps: 10    # Approach 2: surrogate-only iterations per sim call
