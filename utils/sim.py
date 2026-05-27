@@ -9,29 +9,15 @@ the surrogate model, the simulation converges faster and more accurately.
 """
 
 import numpy as np
+import finesse
+import matplotlib.pyplot as plt
+from utils.finesse_base import base_kat
+from finesse.knm import Map
+from finesse.utilities.maps import circular_aperture
 
 
-def true_locking_params(D):
-    """Ground truth locking parameters as a nonlinear function of design params.
-
-    This represents the "true" relationship that the surrogate model
-    tries to learn, and the simulation tries to find.
-
-    Args:
-        D: Design parameters, shape (n, d)
-
-    Returns:
-        L_true: True locking parameters, shape (n, 2)
-    """
-    d = D.shape[1]
-    # Nonlinear mixing of design parameters
-    L1 = np.sin(np.pi * D[:, 0]) * D[:, 1 % d] + 0.5 * D[:, 2 % d]
-    L2 = np.cos(np.pi * D[:, 1 % d]) * D[:, 3 % d] + 0.3 * D[:, 0]
-    return np.column_stack([L1, L2])
-
-
-def simulate(D, L_init=None, noise_scale=0.01):
-    """Mockup simulation that finds accurate locking parameters.
+def simulate(D, L_init=None):
+    """Finesse simulation that produce .
 
     Simulates the behavior of an expensive physics simulation:
     - With good initial guess (from surrogate): small residual noise
@@ -46,14 +32,29 @@ def simulate(D, L_init=None, noise_scale=0.01):
     Returns:
         L_star: Refined locking parameters, shape (n, 2)
     """
-    L_true = true_locking_params(D)
-
     if L_init is not None:
         # Good initial guess: simulation converges accurately
-        noise = noise_scale * np.random.randn(*L_true.shape)
+        L_star = finesse_sim(D, L_init)
     else:
         # No initial guess: larger residual (simulation struggles)
-        noise = 5 * noise_scale * np.random.randn(*L_true.shape)
+        L_star = finesse_sim(D)
 
-    L_star = L_true + noise
     return L_star
+
+def finesse_sim(D, L_init=None):
+
+    ITM_ROC, ETM_ROC = D
+    
+    kat = base_kat.deepcopy()
+    kat.ITM.Rc = ITM_ROC
+    kat.ETM.Rc = ETM_ROC
+    kat.ETM.phi = L_init
+    x = y = np.linspace(-0.17, 0.17, 101)
+    kat.ETM.surface_map = Map(x, y, amplitude=circular_aperture(x,y,0.17))
+    out = kat.run("run_locks(display_progress=true,)")
+
+    L = kat.ETM.phi.value
+
+    return L
+
+    

@@ -29,7 +29,7 @@ class LockingOracle:
         noise_scale: Simulation noise level.
     """
 
-    def __init__(self, use_surrogate_init=True, noise_scale=0.01):
+    def __init__(self, use_surrogate_init=True):
         """Initialize LockingOracle.
 
         Args:
@@ -38,7 +38,6 @@ class LockingOracle:
         """
         self.engine = None  # Set after engine creation via: oracle.engine = engine
         self.use_surrogate_init = use_surrogate_init
-        self.noise_scale = noise_scale
 
     def __call__(self, D):
         """Run locking simulation on design parameters.
@@ -56,6 +55,6 @@ class LockingOracle:
                 L_init = self.engine.models[0].predict(D)
 
         # Run simulation (expensive in reality, mockup here)
-        L_star = simulate(D, L_init=L_init, noise_scale=self.noise_scale)
+        L_star = simulate(D, L_init=L_init)
 
         return L_star
