@@ -27,11 +27,37 @@ def simulate(D, L_init=None):
         D: Design parameters, shape (n, d)
         L_init: Initial guess for locking params from surrogate, shape (n, 2).
                 None if no surrogate prediction available.
-        noise_scale: Base noise level (default 0.01)
-
     Returns:
         L_star: Refined locking parameters, shape (n, 2)
     """
+    L_true = true_locking_params(D)
+
+    L_star = L_true
+    return L_star
+
+def finesse_sim(D, L_init=None):
+
+    ITM_ROC, ETM_ROC = D
+    
+    kat = base_kat.deepcopy()
+    kat.ITM.Rc = ITM_ROC
+    kat.ETM.Rc = ETM_ROC
+    kat.ETM.phi = L_init
+    x = y = np.linspace(-0.17, 0.17, 101)
+    kat.ETM.surface_map = Map(x, y, amplitude=circular_aperture(x,y,0.17))
+    kat.parse("""fd E_itm ITM.p2.i f=0
+              fd E_etm ETM.p1.i f=0""")
+    out = kat.run("run_locks(display_progress=true,)")
+
+    L = kat.ETM.phi.value
+
+    return out
+
+
+def simulate_finesse(D, L_init=None, noise_scale=0.00):
+
+    D = tuple(x * noise_scale for x in D)
+
     if L_init is not None:
         # Good initial guess: simulation converges accurately
         L_star = finesse_sim(D, L_init)
