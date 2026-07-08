@@ -9,11 +9,11 @@ an initial guess for L, which helps the simulation converge faster.
 
 import numpy as np
 
-from utils.sim import simulate
+from utils.sim import finesse_sim
 
 
-class LockingOracle:
-    """Oracle that runs locking simulation.
+class FPOracle:
+    """Oracle that runs fabry-perot simulation.
 
     Takes design params D, optionally uses surrogate model for initial
     guess, runs simulation to get accurate locking params L*.
@@ -29,32 +29,26 @@ class LockingOracle:
         noise_scale: Simulation noise level.
     """
 
-    def __init__(self, use_surrogate_init=True):
-        """Initialize LockingOracle.
+    def __init__(self):
+        """Initialize FPOracle.
 
         Args:
             use_surrogate_init: Use trained surrogate for initial guess (default True)
             noise_scale: Simulation noise level (default 0.01)
         """
         self.engine = None  # Set after engine creation via: oracle.engine = engine
-        self.use_surrogate_init = use_surrogate_init
 
     def __call__(self, D):
-        """Run locking simulation on design parameters.
+        """Run fabry-perot simulation on design parameters.
 
         Args:
-            D: Design parameters, shape (n, d)
+            D: Design parameters, shape (d)
 
         Returns:
-            L_star: Accurate locking parameters, shape (n, 2)
+            cavity_power: Cavity power, float
         """
-        # Get initial guess from surrogate if available
-        L_init = None
-        if self.use_surrogate_init and self.engine is not None:
-            if self.engine.models and self.engine.models[0].is_trained:
-                L_init = self.engine.models[0].predict(D)
 
-        # Run simulation (expensive in reality, mockup here)
-        L_star = simulate(D, L_init=L_init)
+        # Run expansive simulation
+        cavity_power = finesse_sim(D)
 
-        return L_star
+        return cavity_power

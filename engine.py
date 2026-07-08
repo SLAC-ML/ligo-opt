@@ -9,7 +9,7 @@ import torch
 
 
 # GNN model and training code:
-class LinGNN(torch.nn.Module):
+class PowGNN(torch.nn.Module):
     def __init__(self, num_features=3, hidden_size=700, target_size=1, num_edge_features=2, num_layers=20, lin_layers = 6, lin_size=800):
         super().__init__()
         self.hidden_size = hidden_size
@@ -122,35 +122,3 @@ def train(model, hyperparams, save_path):
         scheduler.step()
     return None
 
-# if __name__ == '__main__':
-#     dataset_path = 'gnn-ifosim/data/fabry_perot_data.h5'
-    
-#     hyperparams = {
-#         'batch_size' : 100, 
-#         'save_loss_interval' : 5, 
-#         'print_interval' : 1,
-#         'n_epochs' : 200,
-#         'learning_rate' : 1e-5
-#     }
-#     gat_layers = [1, 3, 5, 10, 15, 20]
-#     kan_layers = [1, 3, 5]
-#     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-#     generator = torch.Generator().manual_seed(9302)
-    
-#     for gt in gat_layers:
-#         for kl in kan_layers:
-#             generator = torch.Generator().manual_seed(9302)
-#             # Train a model with only half_aligo data
-#             dataset = PowerDataset(data_files=['data/fabry_perot_data.h5'], max_size=[25000,5000])
-
-#             dataset_size = len(dataset)
-#             train_size = int(0.8 * dataset_size)  # 80% for training
-#             test_size = dataset_size - train_size  # 20% for testing
-
-#             # Split the dataset
-#             data_train, data_val = random_split(dataset, [train_size, test_size], generator=generator) 
-#             print("Loaded dataset. Beginning training.")
-#             # dp, lab = data_train[0]
-
-#             model = (PowerGNN(hidden_size=1000, num_layers=gt, lin_layers=kl, target_size = 1)).to(device) # needs to be double precision
-#             model_loss_traj = train(model, hyperparams, save_path=f'power_mixed_gat_{gt}_kan_{kl}')
