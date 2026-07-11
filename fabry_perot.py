@@ -10,21 +10,13 @@ The saved file is then used to train a GNN model
 
 
 import numpy as np
-import networkx as nx
 import finesse
 import pickle
-import warnings
 import h5py
 
-import finesse.analysis.actions as fac
-from finesse.analysis.actions import Xaxis, Series
-from finesse.components.readout import ReadoutDetectorOutput
-
-from sympy import symbols, solveset, limit
-
-from utils import model_to_nx_port
+from GNN.GNN_utils import model_to_nx_port
 from tqdm import tqdm
-from finesse_base import base_kat
+from utils.finesse_base import base_kat
 from finesse.utilities.maps import circular_aperture
 from finesse.knm import Map
 
@@ -42,16 +34,31 @@ if __name__ == '__main__':
     ITM_ROC_List = np.linspace(ITM_ROC_nominal - 500, ITM_ROC_nominal + 500, 174)
     ETM_ROC_List = np.linspace(ETM_ROC_nominal - 500, ETM_ROC_nominal + 500, 174)
 
-    fabry_perot = base_kat
-    x = y = np.linspace(-0.17, 0.17, 100)
-    base_kat.ETM.surface_map = Map(x, y, amplitude=circular_aperture(x,y,0.17))
-    
-    data = []
+    # Get the nominal q value
+    find_q_kat = base_kat.deepcopy()
+    find_q_kat.parse(f"bp q_value ITM.p1.i prop=q")
+    q_value = find_q_kat.run()["q_value"]
+    print("got q value:", q_value)
 
 
     ########
     # Model 
     ########
+    fabry_perot = base_kat.deepcopy()
+
+    # Add aperture to ETM
+    x = y = np.linspace(-0.17, 0.17, 100)
+    base_kat.ETM.surface_map = Map(x, y, amplitude=circular_aperture(x,y,0.17))
+    # Add fixed q value
+    fabry_perot.parse(f"gauss fixed_q_value ITM.p1.i q={q_value}")
+
+    print("Model is ready")
+
+    ########
+    # Run simulations to collect data
+    ########
+    
+    data = []
 
 
     with tqdm(total=len(ITM_ROC_List)*len(ETM_ROC_List), position=0, desc="sims") as pbar:
@@ -67,7 +74,7 @@ if __name__ == '__main__':
     # Saving the result in hdf5 format
     ########
     
-    with h5py.File('training_dataset_ligoParams.h5', 'w') as f:
+    with h5py.File('GNN/models/training_dataset_ligoParams.h5', 'w') as f:
         for i, graph in enumerate(data):
             # Serialize the graph object using pickle
             serialized_graph = pickle.dumps(graph)

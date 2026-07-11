@@ -1,3 +1,8 @@
+'''
+This file contains the code for training the power predictor
+'''
+
+
 import pickle
 import time
 
@@ -16,7 +21,7 @@ import torch_geometric as pyg
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Dataset
 
-from power_predictor import LinGNN as PowerGNN
+from GNN.power_predictor import LinGNN as PowerGNN
 
 class PowerDataset(Dataset):
     def __init__(self, data_files, max_size = None, transform=None, pre_transform=None):
@@ -43,11 +48,12 @@ class PowerDataset(Dataset):
         data = self.data[idx]
         data = pyg.utils.from_networkx(data, group_node_attrs = ['Rc', 'R', 'alpha'], group_edge_attrs=['length', 'nr'])
         data.x = torch.nan_to_num(data.x, posinf=0).float()
-        data.y = torch.nan_to_num(torch.clamp(torch.log(data.pd), min=-10),posinf=0).float()
+        y_log = torch.log1p(data.pd)
+        data.y = torch.nan_to_num(torch.clamp(y_log, min=-10),posinf=0).float()
         return data
 
 def crit(mod, gt, lam, adj_matr):
-    return nn.functional.l1_loss(gt, mod) + lam*(torch.log(torch.sum(torch.abs(adj_matr.T@torch.exp(mod) - torch.exp(mod)))))
+    return nn.functional.smooth_l1_loss(gt, mod)
 
 def train(model, hyperparams, save_path):
 
@@ -108,8 +114,8 @@ def train(model, hyperparams, save_path):
     return None
 
 if __name__ == '__main__':
-    dataset_path = 'training_dataset_ligoParams.h5'
-    save_path = 'power_predictor_ligoParams'
+    dataset_path = 'GNN/models/training_dataset_ligoParams.h5'
+    save_path = 'GNN/models/power_predictor_ligoParams_loss_fixed'
 
     hyperparams = {
         'batch_size' : 100, 

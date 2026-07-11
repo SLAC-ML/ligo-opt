@@ -7,7 +7,7 @@ import numpy as np
 from torch_geometric.nn.norm import BatchNorm
 from torch_geometric.nn.conv import TransformerConv as GATv2Conv
 
-from fastkan import FastKAN as KAN
+# from fastkan import FastKAN as KAN
 
 class LinGNN(torch.nn.Module):
     def __init__(self, num_features=3, hidden_size=700, target_size=1, num_edge_features=2, num_layers=20, lin_layers = 6, lin_size=800):

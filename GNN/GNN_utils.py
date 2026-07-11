@@ -63,7 +63,7 @@ import time
 
 def _power_ouput(model_result, node_name):
     if model_result == -1:
-        return -1
+        return 0
 
     return model_result[f'p_{node_name}']
 
