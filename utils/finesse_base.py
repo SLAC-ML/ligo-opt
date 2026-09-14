@@ -12,8 +12,6 @@ maxTEM = 6
 
 # 
 
-base_kat = finesse.Model()
-base_kat.modes(maxtem=maxTEM)
 kat_script = """
 # Add a Laser named L0 with a power of 1 W.
 l L0 P=1
@@ -47,7 +45,16 @@ pd1 pdhQ node=ITM.p1.o f=eom1.f phase=90 # Quadrature phase demodulated signal
 # Add a lock
 lock lock_length pdhI ETM.phi -1.0673950644453318 1e-12
 """
-base_kat.parse(kat_script)
+
+# The GNN needs the optical topology, mirror properties, and beam tracing from
+# this core model. It does not need the per-node Finesse detectors added below.
+# Keeping a separate template makes every surrogate deepcopy smaller while the
+# full Finesse model retains all simulation outputs used for training/feedback.
+gnn_base_kat = finesse.Model()
+gnn_base_kat.modes(maxtem=maxTEM)
+gnn_base_kat.parse(kat_script)
+
+base_kat = gnn_base_kat.deepcopy()
 
 ################
 # Add pd, fd, and bp commands for each node in the base kat model

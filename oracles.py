@@ -49,6 +49,8 @@ class FPOracle:
         """
 
         # Run expansive simulation
-        cavity_power = finesse_sim(D)
+        # finesse_sim now returns (pd_names, powers, q_names, q_values);
+        # the oracle only needs the powers.
+        _, cavity_power, _, _ = finesse_sim(D)
 
         return cavity_power

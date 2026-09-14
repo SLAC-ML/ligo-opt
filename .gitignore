@@ -5,3 +5,6 @@ runs/
 Figures/
 *.egg-info/
 GNN/models/*
+AGENTS.md
+.vscode/
+.clinerules/
