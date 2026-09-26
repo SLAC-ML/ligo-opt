@@ -1,56 +1,73 @@
-"""Oracle functions for locking-parameter optimization.
+"""Run prepared Finesse cavity models to obtain reference simulation outputs.
 
-The oracle wraps the simulation: given design parameters D, it runs the
-(expensive) simulation to obtain accurate locking parameters L*.
-
-The oracle can optionally use the trained surrogate model to provide
-an initial guess for L, which helps the simulation converge faster.
+finesse_sim returns detector names, powers, beam-parameter detector names, and
+complex beam parameters. Unstable cavities and failed solves produce zero outputs.
+Callers prepare geometries and handle perturbation sequences and graph storage.
 """
 
-import numpy as np
-
-from utils.sim import finesse_sim
+import finesse
 
 
-class FPOracle:
-    """Oracle that runs fabry-perot simulation.
+def _power_ouput(model_result, node_name):
+    if model_result == -1:
+        return 0
 
-    Takes design params D, optionally uses surrogate model for initial
-    guess, runs simulation to get accurate locking params L*.
+    return model_result["noxaxis"][node_name]
 
-    The oracle returns L* (not objectives). The mpBAX model trains on
-    (D, L*) pairs, learning the D -> L mapping. The algorithm computes
-    objectives internally from (D, L_predicted).
+def _q_output(model_result, node_name):
+    """Extract a beam-parameter (q) detector value from a simulation result.
 
-    Attributes:
-        engine: Reference to the Engine instance (set after creation).
-                Used to access the trained surrogate model for initial guesses.
-        use_surrogate_init: Whether to use surrogate predictions as initial guess.
-        noise_scale: Simulation noise level.
+    The base kat model (see utils/finesse_base.py) already defines a `bp`
+    detector named `q_{node}` for every node in the optical network, so the
+    q value for a given node is simply `out["q_{node}"]`. If the simulation
+    failed (out == -1) we return 0 as a placeholder, matching the power
+    convention used by `_power_ouput`.
     """
+    if model_result == -1:
+        return 0
 
-    def __init__(self):
-        """Initialize FPOracle.
+    return model_result["noxaxis"][node_name]
 
-        Args:
-            use_surrogate_init: Use trained surrogate for initial guess (default True)
-            noise_scale: Simulation noise level (default 0.01)
-        """
-        self.engine = None  # Set after engine creation via: oracle.engine = engine
+def finesse_sim(run_kat):
+    if not run_kat.cavArm.is_stable:
+            out = -1
+    else:
+        try:
+            out = run_kat.run("""Series(
+                                run_locks(max_iterations=100000,),
+                                noxaxis(),
+                                )""")["noxaxis"]
+            
+        except finesse.exceptions.LostLock:
+            out = -1
+        except Exception:
+            # A cavity that passes the stability check but still fails to solve
+            # (e.g. sitting right on the stability boundary, or a lock that never
+            # converges) is treated as unsolvable the same way an unstable cavity
+            # is: everything comes back as 0, so the GNN learns these geometries
+            # as zero-power. Keeps a single bad grid point from aborting a long
+            # data-generation run.
+            out = -1
+    
+    pd_names = []
+    q_names = []
+    kat_g = run_kat.optical_network
+    for node in kat_g.nodes():
+            name = node.replace('.', '_')
+            pd_names.append(f"p_{name}")
+            q_names.append(f"q_{name}")
 
-    def __call__(self, D):
-        """Run fabry-perot simulation on design parameters.
+    powers = []
+    for name in pd_names:
+        powers.append(_power_ouput(out, name))
 
-        Args:
-            D: Design parameters, shape (d)
+    # Extract the complex beam parameter (q) for every node. For a simple
+    # cavity the q value at the input node (e.g. ITM.p1.i) is the laser's
+    # beam parameter matched to the cavity eigenmode. The `bp` detectors are
+    # already added to the base kat model in utils/finesse_base.py.
+    q_values = []
+    for name in q_names:
+        q_values.append(_q_output(out, name))
+    # L = kat.ETM.phi.value
 
-        Returns:
-            cavity_power: Cavity power, float
-        """
-
-        # Run expansive simulation
-        # finesse_sim now returns (pd_names, powers, q_names, q_values);
-        # the oracle only needs the powers.
-        _, cavity_power, _, _ = finesse_sim(D)
-
-        return cavity_power
+    return pd_names, powers, q_names, q_values

@@ -1,13 +1,11 @@
 import os
 
 from utils.calc import COST_MODE, calc_cost
-from utils.sim import finesse_sim
+from oracles import finesse_sim
 from GNN.GNN_run import GNNPowerPredictor
 from GNN.GNN_utils import model_to_nx_port, append_graph_to_h5, kat_manipulation
 from perturbation import calc_perturbed_params
 import numpy as np
-from sko.PSO import PSO
-from sko.tools import func_transformer
 
 
 # Controls how many cavity evaluations are performed for each objective call.
@@ -19,6 +17,39 @@ from sko.tools import func_transformer
 EVALUATION_MODE = "perturbed"
 
 VALID_EVALUATION_MODES = {"nominal", "perturbed"}
+
+
+class _ReusableGNNKats:
+    """Private beam-trace models for one sequential GNN objective wrapper.
+
+    ``update`` returns a borrowed mutable model. Convert it to independent graph
+    tensors before calling ``update`` again; never collect its results in a list
+    of KATs or share this helper between concurrent evaluations.
+    """
+
+    def __init__(self, base_kat):
+        self._base_kat = base_kat
+        self._unforced = base_kat.deepcopy()
+        self._fixed = None
+
+    def update(self, itm_roc, etm_roc, q_value=None):
+        if q_value is None or q_value == 0:
+            kat = self._unforced
+        else:
+            if self._fixed is None:
+                # Copy the original template, never a previously traced model.
+                kat = self._base_kat.deepcopy()
+                kat.parse(f"gauss fixed_q_value ITM.p1.i q={q_value}")
+                self._fixed = kat
+            else:
+                kat = self._fixed
+                kat.fixed_q_value.qx = q_value
+                kat.fixed_q_value.qy = q_value
+
+        # Set both radii so no previous candidate's geometry carries over.
+        kat.ITM.Rc = itm_roc
+        kat.ETM.Rc = etm_roc
+        return kat
 
 
 def _power_ouput(ITM_Roc, ETM_Roc, q_value, kat, model_path=None, finetune_data_path=None, predictor_GNN=None):
@@ -70,13 +101,17 @@ def _power_ouput(ITM_Roc, ETM_Roc, q_value, kat, model_path=None, finetune_data_
         return names, powers, qtrace_values[qtrace_idx]
 
 
-def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None, overwrite=False):
+def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None, overwrite=False, evaluation_recorder=None):
     """
     Closure factory: bakes in the fixed simulation parameters (base_kat,
     pd_name, model_path) so the returned cost_fn only
     needs the PSO particle vector `params`. This is what gets passed to
     PSO(func=...) / pso.set_func(...).
 
+    evaluation_recorder : PowerEvaluationRecorder, optional
+        Retain powers from the original evaluations without further inference or
+        simulation. For an unconstrained PSO, strict improvement in particle order
+        selects the same historical best as PSO (including its initial swarm).
     finetune_data_path : str, optional
         Only takes effect when model_path is None (i.e. cost_fn actually runs
         Finesse instead of the GNN surrogate). If given, every finesse_sim() result
@@ -123,6 +158,13 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
     else:
         predictor_GNN = None
 
+    def record(params, cost, itm_powers, etm_powers, itm_names, etm_names, delta):
+        if evaluation_recorder is not None:
+            evaluation_recorder.capture(
+                params, cost, itm_powers, etm_powers, itm_names, etm_names,
+                delta, pd_name, model_path, EVALUATION_MODE,
+            )
+
     def cost_fn(params):
         # PSO calls this with a single particle's position vector.
         # n_dim=2 -> unpack into the two design variables being optimized.
@@ -141,12 +183,15 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
             # consuming these placeholders. No additional simulation is performed.
             nominal_power_list = [D_powers, D_powers, D_powers]
             nominal_name_list = [D_names, D_names, D_names]
-            return calc_cost(
+            cost = calc_cost(
                 None,
                 nominal_power_list, nominal_power_list,
                 nominal_name_list, nominal_name_list,
                 (0.0, 0.0), pd_name,
             )
+            record(params, cost, nominal_power_list, nominal_power_list,
+                   nominal_name_list, nominal_name_list, (0.0, 0.0))
+            return cost
 
         # Generate perturbed ROC values around the current (ITM_Roc, ETM_Roc)
         # point, used for finite-difference-style sensitivity/gradient info.
@@ -185,6 +230,8 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
             Delta, pd_name
         )
 
+        record(params, cost, ITM_power_list, ETM_power_list,
+               ITM_name_list, ETM_name_list, Delta)
         return cost
 
     # Only the surrogate path is vectorized. The Finesse feedback call remains a
@@ -193,14 +240,16 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
     if model_path is None:
         return cost_fn
 
+    working_models = _ReusableGNNKats(base_kat)
+
     def batched_cost_fn(params_matrix):
         """Evaluate one PSO swarm in two GPU GNN batches.
 
         ``params_matrix`` has shape ``(n_particles, 2)``. First the nominal KAT for
         every particle is graph-built and inferred as one batch. Its individual q is
-        then used to build that particle's four perturbed KATs, and all perturbations
-        are inferred in a second batch. CPU KAT/beam-trace construction remains
-        sequential; only independent PyG GNN forwards are batched.
+        then used for that particle's four perturbations, inferred in a second
+        batch. Working KATs are reused sequentially; run_batch snapshots each into
+        independent graph tensors before requesting the next model state.
         """
         params_matrix = np.asarray(params_matrix, dtype=float)
         if params_matrix.ndim != 2 or params_matrix.shape[1] != 2:
@@ -211,55 +260,46 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
         if len(params_matrix) == 0:
             return np.empty(0, dtype=float)
 
-        nominal_kats = [
-            kat_manipulation(
-                itm_roc, etm_roc, base_kat, nominal_q_value=None,
-                include_aperture_maps=False,
-            )
+        # Keep this lazy: a list would contain repeated references to the same
+        # KAT, all with the last candidate's values by the time run_batch reads it.
+        nominal_kats = (
+            working_models.update(itm_roc, etm_roc)
             for itm_roc, etm_roc in params_matrix
-        ]
+        )
         nominal_results = predictor_GNN.run_batch(nominal_kats)
 
         if EVALUATION_MODE == "nominal":
             costs = []
-            for names, powers, _ in nominal_results:
+            for index, (names, powers, _) in enumerate(nominal_results):
                 power_list = [powers, powers, powers]
                 name_list = [names, names, names]
                 costs.append(
                     calc_cost(None, power_list, power_list, name_list, name_list,
                               (0.0, 0.0), pd_name)
                 )
+                record(params_matrix[index], costs[-1], power_list, power_list,
+                       name_list, name_list, (0.0, 0.0))
             return np.asarray(costs, dtype=float)
 
         # Keep each particle's four perturbations contiguous. This makes the output
         # reconstruction explicit and prevents q/particle associations from drifting.
-        perturbation_kats = []
+        perturbation_specs = []
         perturbation_metadata = []
         for (itm_roc, etm_roc), (_, _, q_value) in zip(params_matrix, nominal_results):
             (itm_pos, itm_neg), (etm_pos, etm_neg), delta = calc_perturbed_params(
                 itm_roc, etm_roc
             )
-            perturbation_kats.extend([
-                kat_manipulation(
-                    itm_pos, etm_roc, base_kat, nominal_q_value=q_value,
-                    include_aperture_maps=False,
-                ),
-                kat_manipulation(
-                    itm_neg, etm_roc, base_kat, nominal_q_value=q_value,
-                    include_aperture_maps=False,
-                ),
-                kat_manipulation(
-                    itm_roc, etm_pos, base_kat, nominal_q_value=q_value,
-                    include_aperture_maps=False,
-                ),
-                kat_manipulation(
-                    itm_roc, etm_neg, base_kat, nominal_q_value=q_value,
-                    include_aperture_maps=False,
-                ),
+            perturbation_specs.extend([
+                (itm_pos, etm_roc, q_value),
+                (itm_neg, etm_roc, q_value),
+                (itm_roc, etm_pos, q_value),
+                (itm_roc, etm_neg, q_value),
             ])
             perturbation_metadata.append(delta)
 
-        perturbation_results = predictor_GNN.run_batch(perturbation_kats)
+        perturbation_results = predictor_GNN.run_batch(
+            working_models.update(*spec) for spec in perturbation_specs
+        )
         costs = []
         for index, ((d_names, d_powers, _), delta) in enumerate(
             zip(nominal_results, perturbation_metadata)
@@ -280,6 +320,8 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
                     pd_name,
                 )
             )
+            record(params_matrix[index], costs[-1], itm_power_list, etm_power_list,
+                   itm_name_list, etm_name_list, delta)
         return np.asarray(costs, dtype=float)
 
     # scikit-opt's func_transformer passes the full swarm matrix through unchanged
@@ -287,35 +329,8 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
     batched_cost_fn.mode = "vectorization"
     return batched_cost_fn
 
-class SteppablePSO(PSO):
-    def update_gbest(self):
-        """Keep the best historical cost paired with its historical position.
 
-        The installed scikit-opt implementation selects the index from ``pbest_y``
-        but copies ``X[idx]``. Once that particle has moved, ``gbest_x`` therefore
-        no longer corresponds to ``gbest_y``. The real-Finesse feedback point must
-        be the same geometry whose surrogate cost won, so copy ``pbest_x`` here.
-        """
-        idx_min = self.pbest_y.argmin()
-        if self.gbest_y > self.pbest_y[idx_min]:
-            self.gbest_x = self.pbest_x[idx_min, :].copy()
-            self.gbest_y = self.pbest_y[idx_min].copy()
-
-    def step(self):
-        """Run exactly one PSO iteration (equivalent to one loop of run())."""
-        self.update_V()
-        self.recorder()
-        self.update_X()
-        self.cal_y()
-        self.update_pbest()
-        self.update_gbest()
-        self.gbest_y_hist.append(self.gbest_y)
-        return self.gbest_x, self.gbest_y
-
-    def set_func(self, func):
-        """Swap the objective function between steps."""
-        self.func = func_transformer(func)
-
+# from algorithm import SteppablePSO
 # pso = SteppablePSO(func=main_wrapper_PSO, n_dim=2, pop=300, max_iter=1000, lb=[start_ETM_Roc, start_ITM_Roc], ub=[end_ETM_Roc, end_ITM_Roc], w=0.9, c1=2.0, c2=0.4, verbose=True)
 
 # for i in range(150):

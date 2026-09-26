@@ -20,7 +20,7 @@ class GNNPowerPredictor:
     @staticmethod
     def _beam_q_values(kat):
         """Per-node complex beam parameters, populated exactly the way the training
-        data was generated (see fabry_perot.py / utils/sim.py):
+        data was generated (see fabry_perot.py / oracles.py):
 
         - Stable cavity: run a cheap ABCD beam trace (no matrix/knm solve) and read
           the q at every node. This reproduces the q_re/q_im features the model was
@@ -69,17 +69,21 @@ class GNNPowerPredictor:
         return data, names, q_at_itm
 
     def run_batch(self, kats):
-        """Predict powers for independent KATs in one PyG GPU batch.
+        """Prepare KAT states sequentially, then predict in one PyG GPU batch.
+
+        ``kats`` may be an iterator yielding successive states of a reused model.
+        Finish _prepare_data for each state before advancing the iterator: only
+        the independent graph tensors may be collected, never the KAT references.
 
         Results are ``(names, powers, q_at_ITM)`` tuples in input order. The graphs
         remain disconnected in the PyG batch, so message passing cannot cross PSO
         particle boundaries. The returned q keeps each nominal particle associated
         with only its own four q-mismatched perturbations.
         """
-        if not kats:
+        prepared = [self._prepare_data(kat) for kat in kats]
+        if not prepared:
             return []
 
-        prepared = [self._prepare_data(kat) for kat in kats]
         batch = pyg.data.Batch.from_data_list([item[0] for item in prepared])
         batch = batch.to(self.device, non_blocking=True)
         with torch.no_grad():

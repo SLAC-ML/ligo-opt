@@ -8,3 +8,12 @@ GNN/models/*
 AGENTS.md
 .vscode/
 .clinerules/
+
+# Local regression tests
+/tests/
+
+# Generated experiment data
+/GNN/data/
+
+# Generated analysis results
+/analysis/results/

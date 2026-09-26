@@ -68,7 +68,7 @@ def model_to_nx_port(model, pd_names=None, powers=None, q_names=None, q_values=N
     '''Builds the nx.DiGraph of a finesse model's optical network -- the node/edge
     feature vectors the GNN trains and infers on. This does NOT run the finesse
     simulation itself: pass pd_names/powers and q_names/q_values
-    (finesse_sim(model)'s return value, see utils/sim.py) when you need real pd/q
+    (finesse_sim(model)'s return value, see oracles.py) when you need real pd/q
     labels, e.g. to build training data. Leave them unset when you only need the
     graph's static geometry (Rc/R/alpha/edges), e.g. for GNN inference -- pd and q
     default to 0 and the expensive simulation is skipped entirely.
@@ -185,7 +185,7 @@ def kat_manipulation(
     # ROC changes on power/coupling without the beam mode also shifting.
     #
     # Guard against q == 0: an unstable (or otherwise unsolvable) cavity
-    # comes back from finesse_sim with q = 0 (see utils/sim.py). Passing
+    # comes back from finesse_sim with q = 0 (see oracles.py). Passing
     # that on a `gauss` command raises "Waist size must be a positive
     # number". Treating a zero q the same as None (no forced beam) keeps
     # every caller safe regardless of where the 0 came from.

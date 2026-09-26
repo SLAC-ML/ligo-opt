@@ -33,7 +33,9 @@ FULL_PERTURBATION_WEIGHT = 0.5
 
 # BEGIN TEMPORARY COST RECORDING — delete this block and the call below later.
 RECORD_FULL_COST = True
-FULL_COST_CSV = Path(__file__).resolve().parents[1] / "full_cost_records.csv"
+FULL_COST_CSV = (
+    Path(__file__).resolve().parents[1] / "analysis" / "results" / "full_cost_records.csv"
+)
 
 
 def _record_full_cost(C_power, C_perturb, C_total, nominal_power, Delta, pd_name):
@@ -55,6 +57,7 @@ def _record_full_cost(C_power, C_perturb, C_total, nominal_power, Delta, pd_name
         "weighted_perturbation_cost": FULL_PERTURBATION_WEIGHT * C_perturb,
         "total_cost": C_total,
     }
+    FULL_COST_CSV.parent.mkdir(parents=True, exist_ok=True)
     with FULL_COST_CSV.open("a", newline="") as stream:
         # Prevent concurrent workers from duplicating the header/interleaving rows.
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
@@ -102,15 +105,15 @@ def _record_full_cost(C_power, C_perturb, C_total, nominal_power, Delta, pd_name
 #     loss_ppm = (loss / power_circ) * 1e6
 #     return loss_ppm 
 
-def calc_stability_cost(kat):
-    g_value = kat.cavArm.g[0]
+# def calc_stability_cost(kat):
+#     g_value = kat.cavArm.g[0]
 
-    if g_value < 0.15 or g_value > 0.85:
-        C_stable = 1
-    else:
-        C_stable = 0
+#     if g_value < 0.15 or g_value > 0.85:
+#         C_stable = 1
+#     else:
+#         C_stable = 0
 
-    return C_stable
+#     return C_stable
 
 def _get_power_for_pd_name(pd_name, out_names, powers):
     out_names = np.asarray(out_names)

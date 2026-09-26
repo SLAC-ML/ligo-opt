@@ -11,6 +11,16 @@ The script performs the complete workflow:
 Set RUN_NUMBER below to a new experiment ID before launch. If its data or model
 directory contains anything, startup fails rather than overwriting/mixing results.
 
+The final_result.pkl dictionary retains data/costs_gnn/costs_finesse and adds
+powers_gnn/powers_finesse, each a round-aligned list of dictionaries with nominal,
+ITM_plus, ITM_minus, ETM_plus, ETM_minus powers at the selected detector.
+The evaluations_gnn/evaluations_finesse lists also retain parameters, cost,
+checkpoint, detector, deltas, and cost settings. To reconstruct a saved cost:
+    from utils.power_results import reconstruct_cost
+    cost = reconstruct_cost(result['evaluations_gnn'][round_number - 1])
+Powers come from the original evaluations; no extra model/simulation calls occur.
+In nominal-only mode the four unevaluated perturbation powers are None.
+
 Usage:
     python run.py
 """
@@ -20,18 +30,20 @@ import pickle
 from fabry_perot import generate_initial_data
 from train_power_predictor import train_base_power_predictor
 from utils.finesse_base import base_kat, gnn_base_kat
-from PSOoptimizer import main_wrapper_PSO, SteppablePSO
+from utils.power_results import PowerEvaluationRecorder
+from PSOoptimizer import main_wrapper_PSO
+from algorithm import SteppablePSO
 from finetune_power_predictor import run_finetune
 from tqdm import tqdm
 from pathlib import Path
 
 # Change only this value to start a new experiment. For example, RUN_NUMBER = 7
 # writes exclusively under GNN/data/run7 and GNN/models/run7.
-RUN_NUMBER = 11
+RUN_NUMBER = 12
 
 # Each optimized-LHS design point produces two graphs: the self-consistent design
 # and one nearby geometry with the design q held fixed to teach q mismatch.
-INITIAL_DESIGN_POINTS = 15
+INITIAL_DESIGN_POINTS = 100
 INITIAL_GRAPH_COUNT = 2 * INITIAL_DESIGN_POINTS
 
 ITM_ROC_NOMINAL = -1934
@@ -102,8 +114,15 @@ def _prepare_new_run():
     )
 def _full_gnn_loop(loop_num, port, start_ITM_Roc, end_ITM_Roc, start_ETM_Roc, end_ETM_Roc, model_path=None, finetune_data_path=None):
 
-    cost_fn_finesse = main_wrapper_PSO(base_kat, port, model_path=None, finetune_data_path=finetune_data_path)
-    cost_fn_gnn     = main_wrapper_PSO(gnn_base_kat, port, model_path=model_path)
+    finesse_recorder = PowerEvaluationRecorder()
+    gnn_recorder = PowerEvaluationRecorder()
+    cost_fn_finesse = main_wrapper_PSO(
+        base_kat, port, model_path=None, finetune_data_path=finetune_data_path,
+        evaluation_recorder=finesse_recorder,
+    )
+    cost_fn_gnn = main_wrapper_PSO(
+        gnn_base_kat, port, model_path=model_path, evaluation_recorder=gnn_recorder,
+    )
 
     # print("start building pso")
     max_iter = 100
@@ -122,9 +141,13 @@ def _full_gnn_loop(loop_num, port, start_ITM_Roc, end_ITM_Roc, start_ETM_Roc, en
 
     print("Best parameters found: ", pso.gbest_x)
 
+    # Fail before running Finesse if no valid GNN optimum was found. Verification
+    # uses only captured numbers, never a second prediction at the winning point.
+    gnn_record = gnn_recorder.verified_record(pso.gbest_x, pso.gbest_y)
     finesse_cost = cost_fn_finesse(pso.gbest_x)
+    finesse_record = finesse_recorder.verified_record(pso.gbest_x, finesse_cost)
 
-    return pso.gbest_x, pso.gbest_y, finesse_cost
+    return pso.gbest_x, pso.gbest_y, finesse_cost, gnn_record, finesse_record
 
 def main():
     _prepare_new_run()
@@ -139,6 +162,8 @@ def main():
     data = []
     costs_gnn = []
     costs_finesse = []
+    evaluations_gnn = []
+    evaluations_finesse = []
 
     # Round 1 has no prior fine-tuned checkpoint yet, so start from the same base
     # checkpoint run_finetune itself would fall back to for round 1.
@@ -146,7 +171,7 @@ def main():
 
     for loop_num in tqdm(range(1, total_loop_num + 1)):
         finetune_data_path = FINETUNE_DATA_DIR / f"round{loop_num}.h5"
-        datum, cost_gnn, cost_finesse = _full_gnn_loop(loop_num, port, start_ITM_Roc, end_ITM_Roc, start_ETM_Roc, end_ETM_Roc, model_path=model_path, finetune_data_path=finetune_data_path)
+        datum, cost_gnn, cost_finesse, gnn_record, finesse_record = _full_gnn_loop(loop_num, port, start_ITM_Roc, end_ITM_Roc, start_ETM_Roc, end_ETM_Roc, model_path=model_path, finetune_data_path=finetune_data_path)
         save_path = run_finetune(data_dir=DATA_DIR,
             base_checkpoint_path=BASE_CHECKPOINT_PATH,
             checkpoint_template=CHECKPOINT_TEMPLATE, current_round=loop_num,
@@ -162,10 +187,23 @@ def main():
         data.append(datum)
         costs_gnn.append(cost_gnn)
         costs_finesse.append(cost_finesse)
+        evaluations_gnn.append(gnn_record)
+        evaluations_finesse.append(finesse_record)
     
-    return data, costs_gnn, costs_finesse
-if __name__ == '__main__':
-    data, costs_gnn, costs_finesse = main()
+    # All lists are aligned by round. Named power entries avoid ambiguous column
+    # ordering; full records retain checkpoint and settings for cost reconstruction.
+    return {
+        'data': data,
+        'costs_gnn': costs_gnn,
+        'costs_finesse': costs_finesse,
+        'powers_gnn': [record['powers'] for record in evaluations_gnn],
+        'powers_finesse': [record['powers'] for record in evaluations_finesse],
+        'evaluations_gnn': evaluations_gnn,
+        'evaluations_finesse': evaluations_finesse,
+    }
 
+
+if __name__ == '__main__':
+    result = main()
     with open(DATA_DIR / 'final_result.pkl', 'wb') as f:
-        pickle.dump({'data': data, 'costs_gnn': costs_gnn, 'costs_finesse': costs_finesse}, f)
+        pickle.dump(result, f)

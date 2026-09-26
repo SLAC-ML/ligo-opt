@@ -1,9 +1,8 @@
-"""
-Fabry-Perot Cavity Simulations using Finesse
+"""Generate initial training graphs from sampled Fabry-Perot cavities.
 
-This module provides a framework for generating simulations of Fabry-Perot cavities using the Finesse software. It includes functions for building a KAT model in an ITM, ETM ROC space, converting the model to a GNN model, and collecting graph-based representations of the optical network.
-
-The results are saved to an HDF5 file, which can be used to train a GNN model.
+The generators module supplies optimized-LHS design geometries. This module
+simulates each design and one nearby geometry with the nominal beam parameter
+held fixed, then saves the resulting graph pairs to an HDF5 training dataset.
 """
 
 
@@ -11,57 +10,18 @@ from pathlib import Path
 
 import numpy as np
 import finesse
-from scipy.stats import qmc
+from generators import _validate_bounds, optimized_lhs_roc_samples
 
 from GNN.GNN_utils import model_to_nx_port, append_graph_to_h5, kat_manipulation
 from tqdm import tqdm
 from utils.finesse_base import base_kat
-from utils.sim import finesse_sim
+from oracles import finesse_sim
 
 
 finesse.init_plotting(fmts=["png"])
 
 
 ROC_PERTURBATION_PERCENT = 0.0033
-
-
-def _validate_bounds(name, bounds):
-    """Return finite, increasing ``(lower, upper)`` bounds as floats."""
-    if len(bounds) != 2:
-        raise ValueError(
-            f'{name} bounds must contain exactly two values; got {bounds!r}.'
-        )
-    lower, upper = map(float, bounds)
-    if not np.isfinite([lower, upper]).all() or lower >= upper:
-        raise ValueError(f'{name} bounds must be finite and increasing; got {bounds!r}.')
-    return lower, upper
-
-
-def optimized_lhs_roc_samples(num_design_points, itm_bounds, etm_bounds, seed=9302):
-    """Return a reproducible, discrepancy-optimized LHS over the ROC rectangle."""
-    if (
-        not isinstance(num_design_points, (int, np.integer))
-        or isinstance(num_design_points, (bool, np.bool_))
-        or num_design_points < 1
-    ):
-        raise ValueError(
-            'num_design_points must be a positive integer; '
-            f'got {num_design_points!r}.'
-        )
-    itm_bounds = _validate_bounds('ITM ROC', itm_bounds)
-    etm_bounds = _validate_bounds('ETM ROC', etm_bounds)
-
-    sampler = qmc.LatinHypercube(
-        d=2,
-        optimization='random-cd',
-        seed=seed,
-    )
-    unit_samples = sampler.random(n=int(num_design_points))
-    return qmc.scale(
-        unit_samples,
-        [itm_bounds[0], etm_bounds[0]],
-        [itm_bounds[1], etm_bounds[1]],
-    )
 
 
 def _perturb_pair(
