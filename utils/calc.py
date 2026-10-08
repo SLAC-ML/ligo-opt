@@ -1,26 +1,19 @@
-"""Mockup objective calculation for locking-parameter optimization.
+"""Calculate cavity costs from nominal and perturbed detector powers.
 
-Computes objectives from design parameters D and locking parameters L.
-In reality, this would evaluate physics performance metrics based on
-the locking configuration achieved for a given design.
+COST_MODE selects inverse nominal power, perturbation sensitivity, or their
+weighted sum. Optional CSV recording retains the full-cost components.
 """
 
-# BEGIN TEMPORARY COST RECORDING IMPORTS
 import csv
 import fcntl
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-# END TEMPORARY COST RECORDING IMPORTS
 
 import numpy as np
-from finesse.cymath.homs import HGModes
-from scipy.integrate import dblquad
 
 
-# Keep PSOoptimizer's nominal and four perturbed evaluations unchanged, and select
-# here which objective consumes them. This makes the current step-back test and the
-# eventual full run differ by one explicit setting rather than commented code.
+# Select which objective consumes the nominal and perturbed evaluations.
 # Valid values: "design_power", "perturbation", "full".
 COST_MODE = "full"
 
@@ -31,7 +24,6 @@ FULL_POWER_WEIGHT = 0.5
 FULL_PERTURBATION_WEIGHT = 0.5
 
 
-# BEGIN TEMPORARY COST RECORDING — delete this block and the call below later.
 RECORD_FULL_COST = True
 FULL_COST_CSV = (
     Path(__file__).resolve().parents[1] / "analysis" / "results" / "full_cost_records.csv"
@@ -67,53 +59,7 @@ def _record_full_cost(C_power, C_perturb, C_total, nominal_power, Delta, pd_name
             writer.writeheader()
         writer.writerow(row)
         stream.flush()
-# END TEMPORARY COST RECORDING
 
-
-# def calc_HOM_cost(out):
-#     amp_itm = out["E_itm"].flatten()
-#     p_itm = np.abs(amp_itm)**2
-#     cost = np.sum(p_itm[1:])
-#     return cost
-
-# def calc_round_trip_clipping_loss(kat,out):
-#     r_apeture = 0.17
-
-#     HGs_ITM = HGModes(kat.ITM.p2.i.q, [00])
-#     HGs_ETM = HGModes(kat.ETM.p1.i.q, [00])
-
-#     amp_itm = out["E_itm"].flatten()[:, None]
-#     amp_etm = out["E_etm"].flatten()[:, None]
-#     def intensity_polar_ITM(r, theta):
-#         x = np.array([r * np.cos(theta)], dtype=np.float64)
-#         y = np.array([r * np.sin(theta)], dtype=np.float64)
-#         a = HGs_ITM.compute_points(x,y) * amp_itm
-#         E = np.sum(a, axis=0)[0]
-#         I = np.abs(E)**2 * r #jacobian
-#         return I
-#     def intensity_polar_ETM(r, theta):
-#         x = np.array([r * np.cos(theta)], dtype=np.float64)
-#         y = np.array([r * np.sin(theta)], dtype=np.float64)
-#         a = HGs_ETM.compute_points(x,y) * amp_etm
-#         E = np.sum(a, axis=0)[0]
-#         I = np.abs(E)**2 * r #jacobian
-#         return I
-#     loss_ITM, error_ITM = dblquad(intensity_polar_ITM, 0, 2*np.pi, lambda x: r_apeture, lambda x: 10)
-#     loss_ETM, error_ETM = dblquad(intensity_polar_ETM, 0, 2*np.pi, lambda x: r_apeture, lambda x: 10)
-#     loss = loss_ETM + loss_ITM
-#     power_circ = out['circ']
-#     loss_ppm = (loss / power_circ) * 1e6
-#     return loss_ppm 
-
-# def calc_stability_cost(kat):
-#     g_value = kat.cavArm.g[0]
-
-#     if g_value < 0.15 or g_value > 0.85:
-#         C_stable = 1
-#     else:
-#         C_stable = 0
-
-#     return C_stable
 
 def _get_power_for_pd_name(pd_name, out_names, powers):
     out_names = np.asarray(out_names)
@@ -204,10 +150,6 @@ def cal_D_power_cost(ITM_powers, ITM_names,pd_name):
 
 def calc_cost(kat, ITM_powers, ETM_powers, ITM_names, ETM_names, Delta, pd_name):
 
-    #TODO: find appropriate weighting for each cost term
-    # weight_gain = 0.3
-    # weight_stable = 1 - weight_gain
-
     # Unpack the ITM and ETM powers and names, as well as the Delta values
     ITM_ROC_delta, ETM_ROC_delta = Delta
 
@@ -231,25 +173,14 @@ def calc_cost(kat, ITM_powers, ETM_powers, ITM_names, ETM_names, Delta, pd_name)
     if COST_MODE == "full":
         C_total = FULL_POWER_WEIGHT * C_power + FULL_PERTURBATION_WEIGHT * C_perturb
         C_total = float(C_total) if np.isfinite(C_total) else np.inf
-        # BEGIN TEMPORARY COST RECORDING CALL
         if RECORD_FULL_COST:
             _record_full_cost(
                 C_power, C_perturb, C_total,
                 _get_power_for_pd_name(pd_name, ITM_names[1], ITM_powers[1]),
                 Delta, pd_name,
             )
-        # END TEMPORARY COST RECORDING CALL
         return C_total
 
     raise ValueError(
         f"Unknown COST_MODE {COST_MODE!r}; expected 'design_power', 'perturbation', or 'full'."
     )
-
-    # C_stable
-    # C_stable = calc_stability_cost(kat)
-
-    # C_HOM
-    # C_HOM = calc_HOM_cost(out)
-
-    # C_loss
-    # C_loss = calc_round_trip_clipping_loss(kat)

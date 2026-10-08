@@ -6,6 +6,7 @@ held fixed, then saves the resulting graph pairs to an HDF5 training dataset.
 """
 
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +67,8 @@ def generate_initial_data(
     Every LHS design point contributes two consecutive HDF5 graphs: the design
     cavity with its self-consistent eigenmode, followed by a nearby geometry with
     the design point's q held fixed. Consequently, the output contains exactly
-    ``2 * num_design_points`` graphs.
+    ``2 * num_design_points`` graphs. A sibling ``initial_samples.csv`` records
+    both sample types, their zero-based design IDs, HDF5 keys, and ROCs in metres.
     """
     roc_samples = optimized_lhs_roc_samples(
         num_design_points,
@@ -80,13 +82,14 @@ def generate_initial_data(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists():
-        if overwrite:
-            output_path.unlink()
-        else:
+    samples_path = output_path.with_name('initial_samples.csv')
+    for path in (output_path, samples_path):
+        if path.exists() and not overwrite:
             raise FileExistsError(
-                f'{output_path} already exists. Pass overwrite=True to regenerate it.'
+                f'{path} already exists. Pass overwrite=True to regenerate it.'
             )
+    if output_path.exists():
+        output_path.unlink()
 
     print(
         f'Generating {num_design_points} optimized-LHS design points across the '
@@ -96,8 +99,13 @@ def generate_initial_data(
 
     rng = np.random.default_rng(seed)
     valid_q_pairs = 0
-    with tqdm(total=total_graphs, position=0, desc="initial sims") as pbar:
-        for ITM_ROC, ETM_ROC in roc_samples:
+    with (
+        samples_path.open('w' if overwrite else 'x', newline='', encoding='utf-8') as stream,
+        tqdm(total=total_graphs, position=0, desc="initial sims") as pbar,
+    ):
+        writer = csv.writer(stream)
+        writer.writerow(['design_id', 'sample_type', 'h5_key', 'itm_roc_m', 'etm_roc_m'])
+        for design_id, (ITM_ROC, ETM_ROC) in enumerate(roc_samples):
             design_kat = kat_manipulation(
                 ITM_ROC,
                 ETM_ROC,
@@ -109,6 +117,8 @@ def generate_initial_data(
                 design_kat, pd_names, powers, q_names, q_values
             )
             append_graph_to_h5(graph, output_path)
+            writer.writerow([design_id, 'design', f'sim_{2 * design_id}', ITM_ROC, ETM_ROC])
+            stream.flush()
             pbar.update(1)
 
             design_q_value = q_values[q_names.index('q_ITM_p1_i')]
@@ -132,6 +142,11 @@ def generate_initial_data(
                 perturbed_kat, pd_names, powers, q_names, q_values
             )
             append_graph_to_h5(graph, output_path)
+            writer.writerow([
+                design_id, 'perturbed', f'sim_{2 * design_id + 1}',
+                perturbed_ITM_ROC, perturbed_ETM_ROC,
+            ])
+            stream.flush()
             pbar.update(1)
 
     print(

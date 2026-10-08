@@ -1,13 +1,9 @@
-'''
-This file contains the code for training the power predictor
-'''
-
+"""Load graph datasets and train the base power-prediction GNN."""
 
 import pickle
 import time
 from pathlib import Path
 
-import networkx as nx
 import numpy as np
 import h5py
 
@@ -22,7 +18,7 @@ import torch_geometric as pyg
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Dataset
 
-from GNN.power_predictor import LinGNN as PowerGNN
+from GNN.power_predictor import build_power_predictor
 
 class PowerDataset(Dataset):
     def __init__(self, data_files, max_size = None, transform=None, pre_transform=None):
@@ -90,8 +86,9 @@ def split_graph_pairs(dataset, train_fraction=0.8, seed=9302):
     )
 
 
-def crit(mod, gt, lam, adj_matr):
-    return nn.functional.smooth_l1_loss(gt, mod)
+def crit(prediction, target):
+    """Mean smooth-L1 loss for log-power predictions."""
+    return nn.functional.smooth_l1_loss(prediction, target)
 
 def train(model, hyperparams, data_train, data_val, device, save_path):
 
@@ -113,11 +110,9 @@ def train(model, hyperparams, data_train, data_val, device, save_path):
         for data in loader:
             data = data.to(device)
 
-            edges = data.edge_index.cpu()
-            adj_matr = torch.tensor(nx.adjacency_matrix(nx.from_edgelist(edges.detach().numpy().T)).toarray(), dtype=torch.float32).to(device)
             optimizer.zero_grad()
             out = model(data).to(device)
-            loss = crit(out.reshape(data.y.shape), data.y, 0.1, adj_matr)
+            loss = crit(out.reshape(data.y.shape), data.y)
             epoch_loss += loss.item() 
             loss.backward()
             optimizer.step()
@@ -134,10 +129,8 @@ def train(model, hyperparams, data_train, data_val, device, save_path):
                     out = model(dp).to(device)
                     e = time.time()
                     tot_time += e-s
-                    edges = dp.edge_index.cpu()
-                    adj_matr = torch.tensor(nx.adjacency_matrix(nx.from_edgelist(edges.detach().numpy().T)).toarray(), dtype=torch.float32).to(device)
                     
-                    val_loss += crit(out.reshape(dp.y.shape), dp.y, 0.1, adj_matr)
+                    val_loss += crit(out.reshape(dp.y.shape), dp.y)
                 val_loss /= len(data_val)
                 train_loss = epoch_loss / len(data_train) * batch_size
             
@@ -155,10 +148,17 @@ def train_base_power_predictor(
     dataset_path,
     checkpoint_path,
     hyperparams=None,
-    gat_layers=10,
-    kan_layers=5,
+    graph_layers=None,
+    linear_layers=None,
+    *,
+    gat_layers=None,
+    kan_layers=None,
 ):
-    """Train the initial power GNN and return the checkpoint path produced."""
+    """Train the initial power GNN and return the checkpoint path produced.
+
+    Layer counts default to the shared model factory. gat_layers/kan_layers are
+    retained as keyword aliases for graph_layers/linear_layers.
+    """
     hyperparams = hyperparams or {
         'batch_size' : 100, 
         'save_loss_interval' : 5, 
@@ -199,11 +199,9 @@ def train_base_power_predictor(
         )
     print("Loaded base dataset. Beginning initial training.")
 
-    model = PowerGNN(
-        hidden_size=1000,
-        num_layers=gat_layers,
-        lin_layers=kan_layers,
-        target_size=1,
+    model = build_power_predictor(
+        graph_layers=graph_layers, linear_layers=linear_layers,
+        gat_layers=gat_layers, kan_layers=kan_layers,
     ).to(device)
     save_prefix = str(checkpoint_path.with_suffix(''))
     train(

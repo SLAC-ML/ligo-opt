@@ -1,17 +1,21 @@
-from GNN.power_predictor import LinGNN as PowerGNN
+from GNN.power_predictor import build_power_predictor
 from GNN.GNN_utils import model_to_nx_port
 
 import torch
 import torch_geometric as pyg
 
 class GNNPowerPredictor:
-    def __init__(self, model_path, device=None):
+    def __init__(self, model_path, device=None, *, graph_layers=None, linear_layers=None):
         self.model_path = model_path
+        self.graph_layers = graph_layers
+        self.linear_layers = linear_layers
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = self._load_model()
 
     def _load_model(self):
-        model = PowerGNN(hidden_size=1000, num_layers=10, lin_layers=5, target_size=1)
+        model = build_power_predictor(
+            graph_layers=self.graph_layers, linear_layers=self.linear_layers,
+        )
         model.load_state_dict(torch.load(self.model_path, map_location=self.device, weights_only=True))
         model.to(self.device)
         model.eval()

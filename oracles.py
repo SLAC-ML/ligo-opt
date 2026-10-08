@@ -8,7 +8,7 @@ Callers prepare geometries and handle perturbation sequences and graph storage.
 import finesse
 
 
-def _power_ouput(model_result, node_name):
+def _power_output(model_result, node_name):
     if model_result == -1:
         return 0
 
@@ -21,7 +21,7 @@ def _q_output(model_result, node_name):
     detector named `q_{node}` for every node in the optical network, so the
     q value for a given node is simply `out["q_{node}"]`. If the simulation
     failed (out == -1) we return 0 as a placeholder, matching the power
-    convention used by `_power_ouput`.
+    convention used by `_power_output`.
     """
     if model_result == -1:
         return 0
@@ -59,7 +59,7 @@ def finesse_sim(run_kat):
 
     powers = []
     for name in pd_names:
-        powers.append(_power_ouput(out, name))
+        powers.append(_power_output(out, name))
 
     # Extract the complex beam parameter (q) for every node. For a simple
     # cavity the q value at the input node (e.g. ITM.p1.i) is the laser's
@@ -68,6 +68,5 @@ def finesse_sim(run_kat):
     q_values = []
     for name in q_names:
         q_values.append(_q_output(out, name))
-    # L = kat.ETM.phi.value
 
     return pd_names, powers, q_names, q_values

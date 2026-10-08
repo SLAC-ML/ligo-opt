@@ -52,7 +52,9 @@ ITM_ROC_LIST = np.linspace(ITM_ROC_NOMINAL - 2200.0, ITM_ROC_NOMINAL + 500.0, GR
 ETM_ROC_LIST = np.linspace(ETM_ROC_NOMINAL - 500.0, ETM_ROC_NOMINAL + 2000.0, GRID_SIZE)
 
 MAX_WORKERS = 60
-DEFAULT_PD_NAME = "p_ETM_p1_i"
+from utils.detectors import POWER_DETECTOR
+
+DEFAULT_PD_NAME = POWER_DETECTOR
 OUTPUT_DIRECTORY = REPO_ROOT / "GNN/data/subspace"
 DEFAULT_SAVE_EVERY = 10
 
@@ -210,7 +212,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="checkpoint/result .npz file (default: GNN/data/subspace/<COST_MODE>_cost_map_finesse_50x50.npz)",
+        help="checkpoint/result .npz file (default: GNN/data/subspace/<COST_MODE>_cost_map_finesse_<DETECTOR>_50x50.npz)",
     )
     parser.add_argument(
         "--pd-name",
@@ -248,7 +250,7 @@ def main(argv: list[str] | None = None) -> Path:
     if COST_MODE not in {"design_power", "perturbation", "full"}:
         raise ValueError(f"Unknown COST_MODE in utils/calc.py: {COST_MODE!r}")
     output_path = (
-        args.output or OUTPUT_DIRECTORY / f"{COST_MODE}_cost_map_finesse_50x50.npz"
+        args.output or OUTPUT_DIRECTORY / f"{COST_MODE}_cost_map_finesse_{args.pd_name}_50x50.npz"
     ).expanduser().resolve()
     cost_grid, completed_grid = _load_or_initialize(
         output_path, args.pd_name, args.overwrite

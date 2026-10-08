@@ -38,7 +38,9 @@ from tqdm import tqdm
 
 ITM_ROC = -1934.0
 ETM_ROC = 2245.0
-PORT = "p_ITM_p2_i"
+from utils.detectors import POWER_DETECTOR
+
+PORT = POWER_DETECTOR
 
 LOWER_BOUNDS = [ITM_ROC - 2200.0, ETM_ROC - 500.0]
 UPPER_BOUNDS = [ITM_ROC + 500.0, ETM_ROC + 2000.0]

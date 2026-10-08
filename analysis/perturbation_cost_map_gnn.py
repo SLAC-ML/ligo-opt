@@ -30,7 +30,9 @@ GRID_SIZE = 50
 ITM_ROC_LIST = np.linspace(ITM_ROC_NOMINAL - 2200.0, ITM_ROC_NOMINAL + 500.0, GRID_SIZE)
 ETM_ROC_LIST = np.linspace(ETM_ROC_NOMINAL - 500.0, ETM_ROC_NOMINAL + 2000.0, GRID_SIZE)
 
-DEFAULT_PD_NAME = "p_ETM_p1_i"
+from utils.detectors import POWER_DETECTOR
+
+DEFAULT_PD_NAME = POWER_DETECTOR
 OUTPUT_DIRECTORY = REPO_ROOT / "GNN/data/subspace"
 DEFAULT_SAVE_EVERY = 10
 
@@ -152,7 +154,7 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", type=Path, default=GNN_CHECKPOINT_PATH)
     parser.add_argument(
         "--output", type=Path, default=None,
-        help="result .npz file (default: GNN/data/subspace/<COST_MODE>_cost_map_gnn_50x50.npz)",
+        help="result .npz file (default: GNN/data/subspace/<COST_MODE>_cost_map_gnn_<DETECTOR>_50x50.npz)",
     )
     parser.add_argument("--device", default=None, help="e.g. cpu, cuda, cuda:0 (default: automatic)")
     parser.add_argument("--pd-name", default=DEFAULT_PD_NAME)
@@ -181,7 +183,7 @@ def main(argv=None):
         "gnn_checkpoint_sha256": hashlib.sha256(args.model_path.read_bytes()).hexdigest(),
     }
     output_path = (
-        args.output or OUTPUT_DIRECTORY / f"{calc.COST_MODE}_cost_map_gnn_50x50.npz"
+        args.output or OUTPUT_DIRECTORY / f"{calc.COST_MODE}_cost_map_gnn_{args.pd_name}_50x50.npz"
     ).expanduser().resolve()
     if output_path == args.model_path:
         raise ValueError("The result path must differ from the model checkpoint path.")

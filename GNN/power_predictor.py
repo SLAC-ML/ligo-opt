@@ -1,13 +1,24 @@
-import torch_geometric as pyg
-import networkx as nx
+"""Power-prediction architecture and shared model construction defaults."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from torch_geometric.nn.norm import BatchNorm
-from torch_geometric.nn.conv import TransformerConv as GATv2Conv
+from torch_geometric.nn.conv import TransformerConv
 
-# from fastkan import FastKAN as KAN
+
+# Shared by base training, fine-tuning, and inference. These values match the
+# existing base_*_gat10_kan5.pt and fine-tuned checkpoints.
+DEFAULT_MODEL_CONFIG = {
+    'num_features': 4,
+    'hidden_size': 1000,
+    'target_size': 1,
+    'num_edge_features': 2,
+    'num_layers': 10,
+    'lin_layers': 5,
+    'lin_size': 800,
+}
+
 
 class LinGNN(torch.nn.Module):
     def __init__(self, num_features=4, hidden_size=700, target_size=1, num_edge_features=2, num_layers=20, lin_layers = 6, lin_size=800):
@@ -21,16 +32,14 @@ class LinGNN(torch.nn.Module):
         self.bnn = BatchNorm(in_channels=num_features)
         self.bne = BatchNorm(in_channels=num_edge_features)
         self.batch_norms = nn.ModuleList()
-        # GAT layers
+        # Graph transformer layers
         self.convs = nn.ModuleList()
-        self.convs.append(GATv2Conv(self.num_features, self.hidden_size, edge_dim=num_edge_features))
+        self.convs.append(TransformerConv(self.num_features, self.hidden_size, edge_dim=num_edge_features))
         
         for _ in range(self.num_layers - 2):
-            self.convs.append(GATv2Conv(self.hidden_size, self.hidden_size, edge_dim=num_edge_features))
+            self.convs.append(TransformerConv(self.hidden_size, self.hidden_size, edge_dim=num_edge_features))
             self.batch_norms.append(BatchNorm(in_channels=self.hidden_size))
-        self.convs.append(GATv2Conv(self.hidden_size, self.lin_size, edge_dim=num_edge_features))
-        # # # Linear layers
-        # self.linears = KAN([lin_size]*(lin_layers)+[target_size])
+        self.convs.append(TransformerConv(self.hidden_size, self.lin_size, edge_dim=num_edge_features))
         self.linears = nn.ModuleList()
         for _ in range(lin_layers - 1):
             self.linears.append(nn.Linear(self.lin_size, self.lin_size))
@@ -43,7 +52,7 @@ class LinGNN(torch.nn.Module):
 
         x = self.convs[0](x, edge_index, edge_attr=edge_attr)
         x = F.leaky_relu(x)
-        # Apply GATConv layers with residual connections
+        # Apply graph transformer layers with residual connections
         for i, conv in enumerate(self.convs[1:-1]):
             residual = x
             x = self.batch_norms[i](x)
@@ -61,25 +70,25 @@ class LinGNN(torch.nn.Module):
 
         x = self.linears[-1](x)  # Final output layer
         return x
-        # return self.linears(x)
-    
-# class PowerMLP(nn.Module):
-#     def __init__(self, target_size, input_size, hidden_size=500, num_layers=1):
-#         super().__init__()
-        
-#         self.linears = KAN([input_size]+[hidden_size]*(num_layers-2)+[target_size])
-#         # self.linears = nn.ModuleList()
-#         # self.linears.append(nn.Linear(in_features = input_size, out_features = hidden_size))
-#         # for _ in range(num_layers - 2):
-#         #     self.linears.append(nn.Linear(in_features = hidden_size, out_features = hidden_size))
-#         # self.linears.append(nn.Linear(in_features = hidden_size, out_features = target_size))
-        
-#     def forward(self, x):
-#         # x = F.leaky_relu(self.linears[0](x))
-#         # for layer in self.linears[1:-1]:
-#         #     res = x
-#         #     x = F.leaky_relu(layer(x))
-#         #     x = res+x
-            
-#         # x = F.leaky_relu(self.linears[-1](x))
-#         return self.linears(x)
+
+
+def build_power_predictor(
+    *, graph_layers=None, linear_layers=None, gat_layers=None, kan_layers=None,
+):
+    """Build the power GNN using the shared architecture defaults.
+
+    graph_layers and linear_layers optionally override the shared depths.
+    gat_layers and kan_layers are legacy keyword aliases; the implementation
+    uses graph transformers followed by ordinary linear layers.
+    """
+    config = DEFAULT_MODEL_CONFIG.copy()
+    for name, value, legacy_name, legacy_value, key in (
+        ('graph_layers', graph_layers, 'gat_layers', gat_layers, 'num_layers'),
+        ('linear_layers', linear_layers, 'kan_layers', kan_layers, 'lin_layers'),
+    ):
+        if value is not None and legacy_value is not None and value != legacy_value:
+            raise ValueError(f'{name} and {legacy_name} specify different layer counts.')
+        resolved = value if value is not None else legacy_value
+        if resolved is not None:
+            config[key] = resolved
+    return LinGNN(**config)

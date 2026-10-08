@@ -20,9 +20,9 @@ VALID_EVALUATION_MODES = {"nominal", "perturbed"}
 
 
 class _ReusableGNNKats:
-    """Private beam-trace models for one sequential GNN objective wrapper.
+    """Private beam-trace models for one sequential surrogate objective wrapper.
 
-    ``update`` returns a borrowed mutable model. Convert it to independent graph
+    ``update`` returns a borrowed mutable model. Convert it to independent feature
     tensors before calling ``update`` again; never collect its results in a list
     of KATs or share this helper between concurrent evaluations.
     """
@@ -52,7 +52,7 @@ class _ReusableGNNKats:
         return kat
 
 
-def _power_ouput(ITM_Roc, ETM_Roc, q_value, kat, model_path=None, finetune_data_path=None, predictor_GNN=None):
+def _power_output(ITM_Roc, ETM_Roc, q_value, kat, model_path=None, finetune_data_path=None, predictor_GNN=None):
     """Run the cavity (ITM_Roc, ETM_Roc) and return (names, powers, q_at_ITM).
 
     Builds a deep-copied KAT with the given ITM/ETM ROC and, when q_value is
@@ -101,13 +101,18 @@ def _power_ouput(ITM_Roc, ETM_Roc, q_value, kat, model_path=None, finetune_data_
         return names, powers, qtrace_values[qtrace_idx]
 
 
-def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None, overwrite=False, evaluation_recorder=None):
+def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None, overwrite=False, evaluation_recorder=None, *, surrogate_type="GNN"):
     """
     Closure factory: bakes in the fixed simulation parameters (base_kat,
     pd_name, model_path) so the returned cost_fn only
     needs the PSO particle vector `params`. This is what gets passed to
     PSO(func=...) / pso.set_func(...).
 
+    surrogate_type : {"GNN", "MLP"}, default "GNN"
+        Select the neural network when model_path is supplied. Both predictors
+        return detector names, powers, and the input beam q, so the same cost and
+        fixed-q perturbation logic works for either network. With model_path=None
+        this function still uses real Finesse, independent of surrogate_type.
     evaluation_recorder : PowerEvaluationRecorder, optional
         Retain powers from the original evaluations without further inference or
         simulation. For an unconstrained PSO, strict improvement in particle order
@@ -131,6 +136,8 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
         could be leftover from an earlier, unrelated run. Pass True to delete it and
         start fresh.
     """
+    if surrogate_type not in {"GNN", "MLP"}:
+        raise ValueError(f'Unknown surrogate_type {surrogate_type!r}; expected "GNN" or "MLP".')
     if EVALUATION_MODE not in VALID_EVALUATION_MODES:
         raise ValueError(
             f'Unknown EVALUATION_MODE {EVALUATION_MODE!r}; expected one of '
@@ -154,9 +161,20 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
             )
 
     if model_path is not None:
-        predictor_GNN = GNNPowerPredictor(model_path)
+        if surrogate_type == "MLP":
+            # Import only when selected. The MLP predicts one detector, whose name
+            # travels with its checkpoint; another detector requires retraining.
+            from MLP.predictor import MLPPowerPredictor
+            predictor = MLPPowerPredictor(model_path)
+            if predictor.detector != pd_name:
+                raise ValueError(
+                    f'MLP checkpoint predicts {predictor.detector!r}, '
+                    f'but the objective requests {pd_name!r}.'
+                )
+        else:
+            predictor = GNNPowerPredictor(model_path)
     else:
-        predictor_GNN = None
+        predictor = None
 
     def record(params, cost, itm_powers, etm_powers, itm_names, etm_names, delta):
         if evaluation_recorder is not None:
@@ -174,7 +192,7 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
         # cavity's own eigenmode (no fixed q). finesse_sim returns the q at
         # ITM.p1.i for free, so grab it here and re-apply it as the fixed q
         # for the perturbed runs — no separate q-finding simulation needed.
-        D_names, D_powers, q_value = _power_ouput(ITM_Roc, ETM_Roc, None, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor_GNN)
+        D_names, D_powers, q_value = _power_output(ITM_Roc, ETM_Roc, None, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor)
 
         if EVALUATION_MODE == "nominal":
             # calc_cost's existing interface expects three-entry ITM/ETM lists.
@@ -201,13 +219,13 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
 
         # ITM perturbed powers: only the ITM ROC moves (ETM stays at ETM_Roc),
         # with the fixed q_value from the nominal D run.
-        ITM_names_p_pos, ITM_powers_p_pos, _ = _power_ouput(ITM_ROC_perturbed_pos, ETM_Roc, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor_GNN)
-        ITM_names_p_neg, ITM_powers_p_neg, _ = _power_ouput(ITM_ROC_perturbed_neg, ETM_Roc, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor_GNN)
+        ITM_names_p_pos, ITM_powers_p_pos, _ = _power_output(ITM_ROC_perturbed_pos, ETM_Roc, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor)
+        ITM_names_p_neg, ITM_powers_p_neg, _ = _power_output(ITM_ROC_perturbed_neg, ETM_Roc, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor)
 
         # ETM perturbed powers: only the ETM ROC moves (ITM stays at ITM_Roc),
         # with the fixed q_value from the nominal D run.
-        ETM_names_p_pos, ETM_powers_p_pos, _ = _power_ouput(ITM_Roc, ETM_ROC_perturbed_pos, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor_GNN)
-        ETM_names_p_neg, ETM_powers_p_neg, _ = _power_ouput(ITM_Roc, ETM_ROC_perturbed_neg, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor_GNN)
+        ETM_names_p_pos, ETM_powers_p_pos, _ = _power_output(ITM_Roc, ETM_ROC_perturbed_pos, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor)
+        ETM_names_p_neg, ETM_powers_p_neg, _ = _power_output(ITM_Roc, ETM_ROC_perturbed_neg, q_value, base_kat, model_path=model_path, finetune_data_path=finetune_data_path, predictor_GNN=predictor)
 
         ITM_power_list = [ITM_powers_p_pos, D_powers, ITM_powers_p_neg]
         ITM_name_list = [ITM_names_p_pos, D_names, ITM_names_p_neg]
@@ -234,7 +252,7 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
                ITM_name_list, ETM_name_list, Delta)
         return cost
 
-    # Only the surrogate path is vectorized. The Finesse feedback call remains a
+    # Both surrogate types use this vectorized path. Finesse feedback remains a
     # scalar five-simulation evaluation so it continues to append exactly one round
     # of real graphs at the selected PSO optimum.
     if model_path is None:
@@ -243,13 +261,13 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
     working_models = _ReusableGNNKats(base_kat)
 
     def batched_cost_fn(params_matrix):
-        """Evaluate one PSO swarm in two GPU GNN batches.
+        """Evaluate one PSO swarm in two neural-network batches.
 
         ``params_matrix`` has shape ``(n_particles, 2)``. First the nominal KAT for
-        every particle is graph-built and inferred as one batch. Its individual q is
+        every particle is converted to features and inferred as one batch. Its individual q is
         then used for that particle's four perturbations, inferred in a second
         batch. Working KATs are reused sequentially; run_batch snapshots each into
-        independent graph tensors before requesting the next model state.
+        independent tensors before requesting the next model state.
         """
         params_matrix = np.asarray(params_matrix, dtype=float)
         if params_matrix.ndim != 2 or params_matrix.shape[1] != 2:
@@ -266,7 +284,7 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
             working_models.update(itm_roc, etm_roc)
             for itm_roc, etm_roc in params_matrix
         )
-        nominal_results = predictor_GNN.run_batch(nominal_kats)
+        nominal_results = predictor.run_batch(nominal_kats)
 
         if EVALUATION_MODE == "nominal":
             costs = []
@@ -297,7 +315,7 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
             ])
             perturbation_metadata.append(delta)
 
-        perturbation_results = predictor_GNN.run_batch(
+        perturbation_results = predictor.run_batch(
             working_models.update(*spec) for spec in perturbation_specs
         )
         costs = []
@@ -328,15 +346,3 @@ def main_wrapper_PSO(base_kat, pd_name, model_path=None, finetune_data_path=None
     # when this marker is present; PSO.cal_y then reshapes the returned (N,) costs.
     batched_cost_fn.mode = "vectorization"
     return batched_cost_fn
-
-
-# from algorithm import SteppablePSO
-# pso = SteppablePSO(func=main_wrapper_PSO, n_dim=2, pop=300, max_iter=1000, lb=[start_ETM_Roc, start_ITM_Roc], ub=[end_ETM_Roc, end_ITM_Roc], w=0.9, c1=2.0, c2=0.4, verbose=True)
-
-# for i in range(150):
-#     if i == 75:
-#         pso.set_func(cost_fn_b)   # change cost function mid-run
-#     best_x, best_y = pso.step()
-
-# print("Best parameters found: ", pso.gbest_x)
-# print("Best cost found: ", pso.gbest_y)

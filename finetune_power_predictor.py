@@ -1,17 +1,9 @@
-'''
-This file contains the code for fine-tuning a pretrained power predictor on
-additional data (e.g. new geometries, extra sampling near a region of interest).
+"""Fine-tune a power GNN using new Finesse graphs and historical replay.
 
-All data lives together in one directory (e.g. GNN/data/run1/):
-  - base*.h5        the original full training set (e.g. base.h5)
-  - round{N}.h5      one file per round of new/extra data (round1.h5, round2.h5, ...)
-
-Running this script auto-detects the highest round{N}.h5 present and treats it as
-"new" data; every base*.h5 file plus every earlier round gets folded into "old" data.
-So each time you want another round of fine-tuning, you just drop in the next
-round{N}.h5 and rerun -- it automatically resumes from round N-1's checkpoint (or the
-original base_checkpoint_path for round 1), and you never need to hand-edit paths.
-'''
+Call run_finetune with a data directory, base checkpoint, and checkpoint template.
+When current_round is omitted, it selects the highest round{N}.h5 present and
+resumes from the previous round's checkpoint (or the base model for round 1).
+"""
 
 import glob
 import os
@@ -30,15 +22,8 @@ from tqdm import tqdm
 
 from torch_geometric.loader import DataLoader
 
-from GNN.power_predictor import LinGNN as PowerGNN
+from GNN.power_predictor import build_power_predictor
 from train_power_predictor import PowerDataset
-
-# The very first fine-tune round (round 1, when no earlier round checkpoint exists yet)
-# resumes from this checkpoint. Exposed here so other scripts (e.g. run.py, which needs
-# to know what GNN checkpoint to start its own loop from) can import the same value
-# instead of hardcoding a second copy of this path that can silently drift out of sync.
-
-
 
 def add_weight(weight):
     '''Returns a PowerDataset `transform` that stamps a per-node loss weight onto every
@@ -158,9 +143,12 @@ def run_finetune(
     checkpoint_template=None,
     current_round=None,
     finetune_weight=None,
-    gat_layers=10,
-    kan_layers=5,
+    graph_layers=None,
+    linear_layers=None,
     hyperparams=None,
+    *,
+    gat_layers=None,
+    kan_layers=None,
 ):
     '''Runs one round of fine-tuning: uses current_round when supplied, otherwise
     auto-detects the highest round{N}.h5 file. All newest-round graphs are included
@@ -170,6 +158,8 @@ def run_finetune(
     Historical replay and validation remain at weight 1.0; earlier rounds do not
     contribute to N_base. Resumes from round N-1's checkpoint (or
     base_checkpoint_path for round 1) and returns the save path used.
+    Layer counts default to the shared model factory; gat_layers/kan_layers
+    remain keyword aliases for graph_layers/linear_layers.
     '''
     hyperparams = hyperparams or {
         'batch_size': 100,
@@ -273,23 +263,11 @@ def run_finetune(
     # Build the model with the same architecture as the checkpoint, then load its
     # weights instead of starting from random init -- this is what makes it fine-tuning
     # rather than training from scratch.
-    model = PowerGNN(hidden_size=1000, num_layers=gat_layers, lin_layers=kan_layers, target_size=1).to(device)
+    model = build_power_predictor(
+        graph_layers=graph_layers, linear_layers=linear_layers,
+        gat_layers=gat_layers, kan_layers=kan_layers,
+    ).to(device)
     model.load_state_dict(torch.load(pretrained_path, map_location=device, weights_only=True))
 
     finetune(model, hyperparams, data_train, data_val, device, save_path=save_path)
     return save_path
-
-
-# if __name__ == '__main__':
-#     # Usage: drop the next round's data at GNN/data/run1/round{N}.h5 (alongside base.h5
-#     # already there), then run this file as-is with `python finetune_power_predictor.py`.
-#     # It auto-detects the highest round present and resumes from round N-1's checkpoint
-#     # (round 1 resumes from the original base_checkpoint_path).
-#     #
-#     # To tweak settings per call instead of editing this file, import and call the
-#     # function directly, e.g. from a notebook or another script:
-#     #   from finetune_power_predictor import run_finetune
-#     #   run_finetune(finetune_weight=10.0, hyperparams={'batch_size': 100,
-#     #                'save_loss_interval': 5, 'print_interval': 1, 'n_epochs': 20,
-#     #                'learning_rate': 5e-7})
-#     run_finetune()

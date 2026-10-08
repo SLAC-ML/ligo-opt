@@ -1,4 +1,5 @@
 import finesse
+from utils.detectors import POWER_NODE
 
 ################
 # Parameters for the base kat model
@@ -33,8 +34,8 @@ m ETM L=0 T=5u  Rc=2245
 
 cavity cavArm source=ITM.p2.o
 
-# Power detectors on reflection, circulation and transmission.
-pd circ ETM.p1.i
+# Diagnostic circulating-power alias follows the shared objective detector.
+pd circ __POWER_NODE__
 
 pd1 pdhI node=ITM.p1.o f=eom1.f phase=0 # In phase demodulated signal
 pd1 pdhQ node=ITM.p1.o f=eom1.f phase=90 # Quadrature phase demodulated signal
@@ -44,7 +45,7 @@ pd1 pdhQ node=ITM.p1.o f=eom1.f phase=90 # Quadrature phase demodulated signal
 
 # Add a lock
 lock lock_length pdhI ETM.phi -1.0673950644453318 1e-12
-"""
+""".replace("__POWER_NODE__", POWER_NODE)
 
 # The GNN needs the optical topology, mirror properties, and beam tracing from
 # this core model. It does not need the per-node Finesse detectors added below.

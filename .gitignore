@@ -17,3 +17,7 @@ AGENTS.md
 
 # Generated analysis results
 /analysis/results/
+
+# Generated MLP experiment artifacts (tutorial/source/tests remain tracked)
+/MLP/data/
+/MLP/models/
