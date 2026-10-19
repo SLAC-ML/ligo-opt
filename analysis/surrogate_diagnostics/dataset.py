@@ -10,6 +10,7 @@ import h5py
 import torch
 
 from MLP.data import DEFAULT_DETECTOR, FEATURE_NAMES, PowerDataset
+from utils.training_groups import read_design_group_size
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DIRECTIONS = ("nominal", "ITM_plus", "ITM_minus", "ETM_plus", "ETM_minus")
@@ -28,8 +29,11 @@ def write_csv(path, rows):
     rows = list(rows)
     if not rows:
         return
+    # Newer runs can record diagnostics absent from older training histories.
+    # Keep every field, in first-seen order, and leave unavailable values blank.
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with Path(path).open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -81,6 +85,14 @@ def _load_file(path, detector):
     return dataset
 
 
+def _validate_direction_order(x, path, group_id):
+    # Initial five-row designs and feedback share PSOoptimizer's order.
+    differences = x[1:, :2] - x[0, :2]
+    for row, axis, sign in ((0, 0, 1), (1, 0, -1), (2, 1, 1), (3, 1, -1)):
+        if differences[row, axis] * sign <= 0 or abs(differences[row, 1-axis]) > 1e-3:
+            raise ValueError(f"Unexpected perturbation order in {path}, group {group_id}")
+
+
 def load_groups(config, selection):
     root = repo_path(config["data_dir"])
     detector = config.get("detector", DEFAULT_DETECTOR)
@@ -96,16 +108,26 @@ def load_groups(config, selection):
             raise ValueError(f"Expected one base*.h5 file in {root}")
         path = paths[0]
         data = _load_file(path, detector)
-        if len(data) % 2:
-            raise ValueError("Base dataset must contain consecutive nominal/perturbed pairs.")
-        ids = range(len(data) // 2) if base_ids == "all" else base_ids
+        group_size = read_design_group_size(path)
+        if group_size not in (2, len(DIRECTIONS)):
+            raise ValueError(f"Unsupported base design group size {group_size} in {path}; expected 2 or 5.")
+        if len(data) % group_size:
+            if group_size == 2:
+                raise ValueError("Base dataset must contain consecutive nominal/perturbed pairs.")
+            raise ValueError(f"{path}: expected complete nominal + four-perturbation groups.")
+        directions = ("nominal", "joint") if group_size == 2 else DIRECTIONS
+        ids = range(len(data) // group_size) if base_ids == "all" else base_ids
         for group_id in ids:
-            if not isinstance(group_id, int) or not 0 <= group_id < len(data) // 2:
-                raise ValueError(f"Invalid base pair ID: {group_id}")
-            start = 2 * group_id
+            if not isinstance(group_id, int) or not 0 <= group_id < len(data) // group_size:
+                kind = "pair" if group_size == 2 else "group"
+                raise ValueError(f"Invalid base {kind} ID: {group_id}")
+            start = group_size * group_id
+            x = data.x[start:start + group_size]
+            if group_size == len(DIRECTIONS):
+                _validate_direction_order(x, path, group_id)
             groups.append(Group(f"base:{group_id}", str(path),
-                                [f"sim_{start}", f"sim_{start + 1}"],
-                                ("nominal", "joint"), data.x[start:start + 2], data.y[start:start + 2]))
+                                [f"sim_{i}" for i in range(start, start + group_size)],
+                                directions, x, data.y[start:start + group_size]))
     for number in selection.get("rounds", []):
         if not isinstance(number, int) or number < 1:
             raise ValueError(f"Invalid feedback round: {number}")
@@ -115,12 +137,7 @@ def load_groups(config, selection):
             raise ValueError(f"{path}: expected complete nominal + four-perturbation groups.")
         for start in range(0, len(data), 5):
             x = data.x[start:start + 5]
-            # Confirm the order assumed by PSOoptimizer and catch accidental
-            # nominal-only data or swapped direction labels.
-            differences = x[1:, :2] - x[0, :2]
-            for row, axis, sign in ((0, 0, 1), (1, 0, -1), (2, 1, 1), (3, 1, -1)):
-                if differences[row, axis] * sign <= 0 or abs(differences[row, 1-axis]) > 1e-3:
-                    raise ValueError(f"Unexpected perturbation order in {path}, group {start // 5}")
+            _validate_direction_order(x, path, start // 5)
             groups.append(Group(f"round:{number}:{start // 5}", str(path),
                                 [f"sim_{i}" for i in range(start, start + 5)],
                                 DIRECTIONS, x, data.y[start:start + 5]))

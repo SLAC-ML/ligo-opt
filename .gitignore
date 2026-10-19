@@ -6,6 +6,7 @@ Figures/
 *.egg-info/
 GNN/models/*
 AGENTS.md
+GEMINI.md
 .vscode/
 .clinerules/
 

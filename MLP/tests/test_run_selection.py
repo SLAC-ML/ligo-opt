@@ -16,6 +16,10 @@ from unittest.mock import Mock, patch
 
 import torch
 
+# scikit-opt sets the multiprocessing start method at import. Load the driver's
+# PSO dependency during discovery, before training tests initialize that context.
+import algorithm
+
 from MLP.checkpoint import load_checkpoint, save_checkpoint
 from MLP.model import DEFAULT_MODEL_CONFIG, build_power_predictor
 from MLP.tests.test_workflow import DETECTOR, SMALL_MODEL, write_graphs
@@ -53,8 +57,9 @@ class RunSelectionTests(unittest.TestCase):
                 expected_models = root / surrogate / "models" / "run7"
                 self.assertEqual(driver.DATA_DIR, expected_data)
                 self.assertEqual(driver.MODEL_DIR, expected_models)
-                self.assertEqual(driver.BASE_DATA_PATH, expected_data / "base_6.h5")
-                filename = "base_6_mlp.pt" if surrogate == "MLP" else "base_6_gat10_kan5.pt"
+                self.assertEqual(driver.INITIAL_GRAPH_COUNT, 15)
+                self.assertEqual(driver.BASE_DATA_PATH, expected_data / "base_15.h5")
+                filename = "base_15_mlp.pt" if surrogate == "MLP" else "base_15_gat10_kan5.pt"
                 self.assertEqual(driver.BASE_CHECKPOINT_PATH, expected_models / filename)
                 self.assertEqual(driver.FINETUNE_DATA_DIR, expected_data)
                 self.assertEqual(
@@ -104,6 +109,12 @@ class RunSelectionTests(unittest.TestCase):
                 self.assertEqual(settings["training"]["finetune"], selected_finetune)
                 self.assertEqual(settings["objective"]["detector"], "p_ETM_p1_i")
                 self.assertEqual(settings["sampling"]["seed"], 321)
+                self.assertEqual(settings["sampling"]["design_group_size"], 5)
+                self.assertEqual(settings["sampling"]["initial_graph_count"], 15)
+                self.assertEqual(settings["sampling"]["sample_types"],
+                                 ('design', 'ITM_plus', 'ITM_minus', 'ETM_plus', 'ETM_minus'))
+                self.assertEqual(settings["sampling"]["roc_perturbation_fraction"],
+                                 settings["objective"]["roc_perturbation_fraction"])
                 self.assertEqual(
                     metadata.call_args.kwargs["paths"]["base_checkpoint"],
                     driver.BASE_CHECKPOINT_PATH,

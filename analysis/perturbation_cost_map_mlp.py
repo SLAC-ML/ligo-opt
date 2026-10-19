@@ -5,6 +5,9 @@ Run from the repository root:
 
 Use --model-path to select another MLP checkpoint, --device cpu to use the CPU,
 or --output to save a separate map. Rerun to resume; --overwrite recomputes it.
+In full mode, cost details are recorded beside the map in <map-name>_records.csv,
+instead of the shared full_cost_records.csv. Resuming appends new evaluations;
+--overwrite also resets this map's cost records.
 The objective follows COST_MODE and the weights in utils/calc.py, just like
 the Finesse script. Each point predicts nominal power and four perturbations with fixed
 nominal q. No full Finesse power simulations are performed.
@@ -22,7 +25,8 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Checkpoint selected in the notebook; edit here or pass --model-path.
-MLP_CHECKPOINT_PATH = REPO_ROOT / "MLP/models/run1/power_predictor_ligoParams_finetuned_round40.pt"
+# MLP_CHECKPOINT_PATH = REPO_ROOT / "MLP/models/run1/power_predictor_ligoParams_finetuned_round40.pt"
+MLP_CHECKPOINT_PATH = REPO_ROOT / "MLP/models/run3/power_predictor_ligoParams_finetuned_round40.pt"
 
 ITM_ROC_NOMINAL = -1934.0
 ETM_ROC_NOMINAL = 2245.0
@@ -37,7 +41,7 @@ OUTPUT_DIRECTORY = REPO_ROOT / "MLP/data/subspace"
 DEFAULT_SAVE_EVERY = 10
 
 
-def full_mlp_cost(itm_roc, etm_roc, pd_name, predictor):
+def full_mlp_cost(itm_roc, etm_roc, pd_name, predictor, *, full_cost_csv=None):
     """Compute the COST_MODE objective from nominal and four perturbed geometries."""
     from GNN.GNN_utils import kat_manipulation
     from perturbation import calc_perturbed_params
@@ -68,6 +72,7 @@ def full_mlp_cost(itm_roc, etm_roc, pd_name, predictor):
         [itm_pos_out[0], d_names, itm_neg_out[0]],
         [etm_pos_out[0], d_names, etm_neg_out[0]],
         delta, pd_name,
+        full_cost_csv=full_cost_csv,
     )
 
 
@@ -194,9 +199,20 @@ def main(argv=None):
     ).expanduser().resolve()
     if output_path == args.model_path:
         raise ValueError("The result path must differ from the model checkpoint path.")
+    full_cost_csv = output_path.with_name(f"{output_path.stem}_records.csv").resolve()
+    record_full_cost = calc.COST_MODE == "full" and calc.RECORD_FULL_COST
+    if record_full_cost and full_cost_csv == Path(calc.FULL_COST_CSV).expanduser().resolve():
+        raise ValueError(
+            "The map's cost-record path would use the shared FULL_COST_CSV. "
+            "Choose a different --output."
+        )
     cost_grid, completed_grid = _load_or_initialize(
         output_path, args.pd_name, args.overwrite, model_metadata
     )
+    if args.overwrite and record_full_cost:
+        full_cost_csv.unlink(missing_ok=True)
+    if record_full_cost:
+        print(f"Cost records: {full_cost_csv}")
     tasks = np.argwhere(~completed_grid)
     if len(tasks):
         print(f"Cost mode: {calc.COST_MODE}")
@@ -210,7 +226,8 @@ def main(argv=None):
             with tqdm(total=len(tasks), desc=f"MLP {calc.COST_MODE} cost map") as pbar:
                 for i, j in tasks:
                     cost_grid[i, j] = full_mlp_cost(
-                        float(ITM_ROC_LIST[i]), float(ETM_ROC_LIST[j]), args.pd_name, predictor
+                        float(ITM_ROC_LIST[i]), float(ETM_ROC_LIST[j]), args.pd_name, predictor,
+                        full_cost_csv=full_cost_csv,
                     )
                     completed_grid[i, j] = True
                     completed_since_save += 1

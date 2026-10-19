@@ -23,7 +23,7 @@ Usage:
 # Add additional note to README
 ###############################
 
-RUN_NOTES = "Initial run does not do well. Adjusted the cost for the model and lets try again. GL"  # Optional: describe this experiment or what changed from the last run.
+RUN_NOTES = "More perturbation data helped, but not enough. Many local response signs is wrong. Add explicit signed perturbation in model loss function as well as nominal-power loss. Use a fixed training-derived scale and keep everything else the same. Hope this can work better. GL"  # Optional: describe this experiment or what changed from the last run.
 
 ###############################
 # END
@@ -31,7 +31,6 @@ RUN_NOTES = "Initial run does not do well. Adjusted the cost for the model and l
 
 import pickle
 
-import fabry_perot
 import perturbation
 import PSOoptimizer
 from GNN import power_predictor
@@ -43,6 +42,7 @@ from fabry_perot import generate_initial_data
 from train_power_predictor import train_base_power_predictor
 from utils.finesse_base import base_kat, gnn_base_kat
 from utils.power_results import PowerEvaluationRecorder
+from utils.training_groups import INITIAL_GROUP_SIZE, INITIAL_SAMPLE_TYPES
 from PSOoptimizer import main_wrapper_PSO
 from algorithm import SteppablePSO
 from finetune_power_predictor import run_finetune
@@ -56,13 +56,13 @@ SURROGATE_TYPE = "MLP"  # Change to "MLP" to run the MLP workflow.
 
 # Choose an unused ID within the selected model's folder. For example, MLP/run7
 # uses MLP/data/run7 and MLP/models/run7, independently of any GNN run7.
-RUN_NUMBER = 2
+RUN_NUMBER = 4
 
 
-# Each optimized-LHS design point produces two graphs: the self-consistent design
-# and one nearby geometry with the design q held fixed to teach q mismatch.
+# Each optimized-LHS point produces five graphs: its self-consistent design and
+# ITM +/-, ETM +/- perturbations with the design q held fixed, matching the cost.
 INITIAL_DESIGN_POINTS = 100
-INITIAL_GRAPH_COUNT = 2 * INITIAL_DESIGN_POINTS
+INITIAL_GRAPH_COUNT = INITIAL_GROUP_SIZE * INITIAL_DESIGN_POINTS
 
 ITM_ROC_NOMINAL = -1934
 ETM_ROC_NOMINAL = 2245
@@ -98,11 +98,14 @@ GNN_FINETUNE_PARAMS = {
     'n_epochs': 20,
     'learning_rate': 5e-7,
 }
-# The map's central high-power plateau differs by only a few thousandths.
-# This *training* loss makes those differences matter; PSO's cost is unchanged.
-# Select "log_smooth_l1" to compare against the original training loss.
+# Supervise nominal power and the signed power responses used by the objective.
+# The existing center-focused criterion supplies the nominal power term.
+# Set supervision to "row_power" for the previous all-row training loss.
 MLP_LOSS_CONFIG = {
     'mode': 'center_focused',
+    'supervision': 'nominal_delta',
+    'delta_weight': 1.0,
+    'delta_scale_floor_w': 1.0,  # Fixed scale: max(floor, initial-training delta RMS).
     'center_power': 282.09,
     'center_width': 0.01,
     'center_error_scale': 0.001,
@@ -197,8 +200,10 @@ def _prepare_new_run():
                 'etm_roc_bounds_m': ETM_ROC_BOUNDS,
                 'design_points': INITIAL_DESIGN_POINTS,
                 'initial_graph_count': INITIAL_GRAPH_COUNT,
+                'design_group_size': INITIAL_GROUP_SIZE,
+                'sample_types': INITIAL_SAMPLE_TYPES,
                 'seed': INITIAL_DATA_SEED,
-                'roc_perturbation_fraction': fabry_perot.ROC_PERTURBATION_PERCENT,
+                'roc_perturbation_fraction': perturbation.roc_perturbation_percent,
             },
             'pso': PSO_SETTINGS,
             'training': {
@@ -231,8 +236,8 @@ def _prepare_new_run():
     )
 
     print(
-        f'[{RUN_NAME}] Generating {INITIAL_DESIGN_POINTS} optimized-LHS design '
-        f'pairs ({INITIAL_GRAPH_COUNT} graphs)...'
+        f'[{RUN_NAME}] Generating {INITIAL_DESIGN_POINTS} optimized-LHS '
+        f'designs with four perturbations each ({INITIAL_GRAPH_COUNT} graphs)...'
     )
     generate_initial_data(
         BASE_DATA_PATH,

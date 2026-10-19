@@ -2,7 +2,7 @@
 
 Fine-tuning starts from learned weights instead of a new random network. We
 replay older training examples to reduce forgetting and give the newest examples
-extra weight. The original validation pairs stay out of training in every round.
+extra weight. The original validation designs stay out of training in every round.
 """
 
 import math
@@ -11,9 +11,11 @@ import warnings
 from pathlib import Path
 
 import torch
+from utils.training_groups import read_design_group_size, validate_group_size
 
 from .checkpoint import load_checkpoint
 from .data import PowerDataset
+from .groups import design_row_metadata, initial_delta_scale
 from .training import (
     DEFAULT_TRAINING_PARAMS, _check_output_paths, _file_sha256,
     _fit_model, _training_params,
@@ -97,18 +99,24 @@ def _restore_base_split(metadata, sample_count):
         if len(set(indices)) != len(indices):
             raise ValueError(f'Checkpoint {name} contains duplicate row indices.')
     train_set, validation_set = set(train), set(validation)
+    # Older checkpoints describe pairs and do not persist their group size.
+    group_size = validate_group_size(metadata.get('base_group_size', 2))
     if mode == 'training_monitor_only':
-        if sample_count != 2 or train_set != {0, 1} or validation_set != {0, 1}:
+        if sample_count != group_size or train_set != set(range(group_size)) or validation_set != train_set:
             raise ValueError('Checkpoint bootstrap split is inconsistent with its base dataset.')
         warnings.warn(
-            'Two-sample bootstrap: checkpoint selection still uses training samples; '
+            'Single-design bootstrap: checkpoint selection still uses training samples; '
             'this is not an independent validation estimate.', UserWarning, stacklevel=2,
         )
-    elif mode == 'held_out_pairs':
-        if sample_count % 2 or train_set & validation_set or train_set | validation_set != set(range(sample_count)):
+    elif mode in ('held_out_pairs', 'held_out_designs'):
+        if mode == 'held_out_pairs' and group_size != 2:
+            raise ValueError('Checkpoint pair validation mode requires a group size of 2.')
+        if sample_count % group_size or train_set & validation_set or train_set | validation_set != set(range(sample_count)):
             raise ValueError('Checkpoint must partition all base rows into disjoint training and validation sets.')
-        if any((index ^ 1) not in indices for indices in (train_set, validation_set) for index in indices):
-            raise ValueError('Checkpoint separates a nominal/perturbed pair across training and validation.')
+        for start in range(0, sample_count, group_size):
+            group = set(range(start, start + group_size))
+            if not (group <= train_set or group <= validation_set):
+                raise ValueError('Checkpoint separates an initial design group across training and validation.')
     else:
         raise ValueError(f'Unsupported checkpoint validation mode: {mode!r}')
     return train, validation
@@ -188,6 +196,8 @@ def run_finetune(
     base_dataset = PowerDataset([expected_base], detector=detector)
     if len(base_dataset) != metadata.get('base_data_count'):
         raise ValueError('Original base dataset size disagrees with checkpoint metadata.')
+    if read_design_group_size(expected_base) != metadata.get('base_group_size', 2):
+        raise ValueError('Original base dataset group size disagrees with checkpoint metadata.')
     train_indices, validation_indices = _restore_base_split(metadata, len(base_dataset))
 
     new_dataset = PowerDataset([rounds[current_round]], detector=detector)
@@ -195,6 +205,31 @@ def run_finetune(
     train_inputs = [base_dataset.x[train_indices]]
     train_targets = [base_dataset.y[train_indices]]
     train_weights = [torch.ones(len(train_indices))]
+    references = {}
+    paired = params['loss']['supervision'] == 'nominal_delta'
+    if paired:
+        train_nominal, train_sizes = design_row_metadata(
+            base_dataset.x, metadata.get('base_group_size', 2), train_indices,
+            validate_directions=True,
+        )
+        validation_nominal, validation_sizes = design_row_metadata(
+            base_dataset.x, metadata.get('base_group_size', 2), validation_indices,
+        )
+        scale = metadata.get('delta_scale_w')
+        if scale is None:
+            if inherited_loss.get('supervision') == 'nominal_delta':
+                raise ValueError('Nominal/delta checkpoint is missing its fixed delta_scale_w.')
+            # Explicitly opting an older checkpoint into the new objective still
+            # fits the scale using its original training split, never feedback.
+            scale = initial_delta_scale(
+                base_dataset.y[train_indices], train_nominal,
+                params['loss']['delta_scale_floor_w'],
+            )
+        nominal_parts, size_parts = [train_nominal], [train_sizes]
+        references = {
+            'validation_nominal_indices': validation_nominal,
+            'validation_group_sizes': validation_sizes, 'delta_scale_w': scale,
+        }
     round_counts = {}
     # Replay only training data. A fixed holdout prevents a validation example
     # from accidentally becoming a training example in a later round.
@@ -205,10 +240,27 @@ def run_finetune(
         train_inputs.append(historical.x)
         train_targets.append(historical.y)
         train_weights.append(torch.ones(len(historical)))
+        if paired:
+            nominal, sizes = design_row_metadata(
+                historical.x, 1 if len(historical) == 1 else 5,
+                validate_directions=True,
+            )
+            nominal_parts.append(nominal + sum(len(part) for part in train_inputs[:-1]))
+            size_parts.append(sizes)
         round_counts[str(number)] = len(historical)
     train_inputs.append(new_dataset.x)
     train_targets.append(new_dataset.y)
     train_weights.append(torch.full((len(new_dataset),), newest_weight))
+    if paired:
+        nominal, sizes = design_row_metadata(
+            new_dataset.x, 1 if len(new_dataset) == 1 else 5, validate_directions=True,
+        )
+        nominal_parts.append(nominal + sum(len(part) for part in train_inputs[:-1]))
+        size_parts.append(sizes)
+        references.update({
+            'train_nominal_indices': torch.cat(nominal_parts),
+            'train_group_sizes': torch.cat(size_parts),
+        })
     round_counts[str(current_round)] = len(new_dataset)
 
     metadata.update({
@@ -231,6 +283,6 @@ def run_finetune(
     _fit_model(
         model, torch.cat(train_inputs), torch.cat(train_targets), torch.cat(train_weights),
         base_dataset.x[validation_indices], base_dataset.y[validation_indices],
-        checkpoint_path, detector, params, metadata, seed=seed + current_round,
+        checkpoint_path, detector, params, metadata, seed=seed + current_round, **references,
     )
     return str(checkpoint_path.with_suffix(''))

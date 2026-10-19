@@ -9,7 +9,7 @@ The objective combines nominal optical power and sensitivity to small changes in
 ```text
 Sample ITM/ETM radii using optimized Latin hypercube sampling
     ↓
-Run Finesse and save design/perturbation graph pairs
+Run Finesse and save five graphs per design
     ↓
 Train the selected surrogate
     ↓
@@ -22,7 +22,7 @@ Save the new graphs and fine-tune the surrogate ──────────�
 Save selected geometries, costs, powers, and evaluation metadata
 ```
 
-Each initial design contributes two training graphs: its nominal cavity and a nearby geometry with the nominal beam parameter `q` held fixed. During optimization, perturbed evaluation uses five geometries: the nominal design and ITM/ETM positive and negative perturbations. Holding the nominal `q` fixed captures the effect of beam mismatch when the mirror geometry changes.
+Each initial design contributes five training graphs, matching the cost evaluations: its nominal cavity, ITM positive and negative perturbations with ETM unchanged, and ETM positive and negative perturbations with ITM unchanged. All four perturbations hold the nominal beam parameter `q` fixed to capture beam mismatch when mirror geometry changes. The step for each mirror is 0.33% of its ROC magnitude. All five graphs stay together in the initial 80/20 training/validation split for either surrogate.
 
 The GNN consumes graph features describing mirror properties, beam parameters, and optical connections. It learns `log1p(power)` per node; inference converts predictions back to powers before calculating the objective. The surrogate path still uses Finesse model construction and beam tracing, but avoids full Finesse power simulations during PSO searches.
 
@@ -41,11 +41,11 @@ Its learning rates and batch sizes are configured separately through
 
 Start with the [MLP tutorial](MLP/README.md) for an explanation of each module,
 input scaling, layers, training, checkpoints, and feedback. The MLP's base
-validation pairs remain held out throughout fine-tuning, and its initial
+validation designs remain held out throughout fine-tuning, and its initial
 training-only input scaling stays fixed. `MLP_LOSS_CONFIG` adds extra loss sensitivity
 near the 282.09 power plateau, with center-only validation error recorded in each
 checkpoint and training log. See the [loss tutorial](MLP/README.md#6-learn-the-central-power-plateau-more-accurately)
-for the formula and settings. GNN training behavior is unchanged.
+for the formula and settings.
 
 ## Environment
 
@@ -69,7 +69,7 @@ Edit [run.py](run.py) before launching. Its experiment settings are grouped as P
 | Surrogate | `run.py`: `SURROGATE_TYPE` | `"GNN"` or `"MLP"`; default `"GNN"` |
 | Experiment ID | `run.py`: `RUN_NUMBER` | `12`; choose a new, unused positive integer |
 | Initial sampling seed | `run.py`: `INITIAL_DATA_SEED` | 9302 |
-| Initial design count | `run.py`: `INITIAL_DESIGN_POINTS` | 100 designs, producing 200 graphs |
+| Initial design count | `run.py`: `INITIAL_DESIGN_POINTS` | 100 designs, producing 500 graphs (400 training, 100 validation) |
 | ITM ROC bounds | `run.py`: `ITM_ROC_BOUNDS` | −4134 to −1434 m |
 | ETM ROC bounds | `run.py`: `ETM_ROC_BOUNDS` | 1745 to 4245 m |
 | Feedback rounds | `run.py`: `TOTAL_ROUNDS` | 40 |
@@ -84,11 +84,11 @@ Edit [run.py](run.py) before launching. Its experiment settings are grouped as P
 | GNN architecture | `GNN/power_predictor.py`: `DEFAULT_MODEL_CONFIG` | Shared by base training, fine-tuning, and inference |
 | Objective | `utils/calc.py`: `COST_MODE` | `"full"`, with both weights set to `0.5` |
 | Evaluation mode | `PSOoptimizer.py`: `EVALUATION_MODE` | `"perturbed"` |
-| Optimization perturbation | `perturbation.py`: `roc_perturbation_percent` | `0.0033`, or 0.33% of each ROC magnitude |
+| Initial and optimization perturbation | `perturbation.py`: `roc_perturbation_percent` | `0.0033`, or 0.33% of each ROC magnitude |
 
 Data and model paths in `run.py` are anchored to the repository, so launching it from a different working directory uses the same locations.
 
-Initial-data perturbations have a separate `ROC_PERTURBATION_PERCENT` setting in `fabry_perot.py`, also currently `0.0033`.
+Initial data and cost evaluation both use `perturbation.calc_perturbed_params`. Sampling bounds apply to nominal designs; their four perturbations may extend slightly beyond those bounds, matching the cost evaluation.
 
 Launch the complete experiment after choosing the settings:
 
@@ -120,8 +120,8 @@ In [PSOoptimizer.py](PSOoptimizer.py), `EVALUATION_MODE="perturbed"` supplies al
 | --- | --- |
 | [run.py](run.py) | Configure and orchestrate the complete experiment |
 | [generators.py](generators.py) | Sample initial ITM/ETM geometries using optimized LHS and validate bounds |
-| [fabry_perot.py](fabry_perot.py) | Coordinate sampling, simulate designs and perturbation partners, and write paired training graphs |
-| [train_power_predictor.py](train_power_predictor.py) | Load graph datasets, split initial pairs, and train the base GNN |
+| [fabry_perot.py](fabry_perot.py) | Coordinate sampling and write each nominal design followed by its four perturbations |
+| [train_power_predictor.py](train_power_predictor.py) | Load graph datasets, split complete initial design groups, and train the base GNN |
 | [finetune_power_predictor.py](finetune_power_predictor.py) | Load prior/new round data and fine-tune the previous checkpoint |
 | [algorithm.py](algorithm.py) | Implement `SteppablePSO` for the main optimization workflow |
 | [PSOoptimizer.py](PSOoptimizer.py) | Build GNN, MLP, or Finesse objective functions |
@@ -131,6 +131,7 @@ In [PSOoptimizer.py](PSOoptimizer.py), `EVALUATION_MODE="perturbed"` supplies al
 | [utils/calc.py](utils/calc.py) | Calculate objectives from nominal and perturbed powers |
 | [utils/run_metadata.py](utils/run_metadata.py) | Save startup settings, code revision, software versions, and artifact paths |
 | [utils/power_results.py](utils/power_results.py) | Capture winning evaluations and reconstruct their costs |
+| [utils/training_groups.py](utils/training_groups.py) | Read initial design group sizes and split complete groups without leakage |
 | [GNN/power_predictor.py](GNN/power_predictor.py) | Define `LinGNN` and the shared `build_power_predictor()` factory |
 | [GNN/GNN_run.py](GNN/GNN_run.py) | Load checkpoints and perform scalar or batched power prediction |
 | [GNN/GNN_utils.py](GNN/GNN_utils.py) | Construct modified cavity models, convert models to graphs, and append HDF5 data |
@@ -158,7 +159,7 @@ GNN/models/runN/
     ... matching checkpoint/log pairs through round40
 ```
 
-The round count follows `run.py`. HDF5 files store serialized NetworkX graphs under `sim_0`, `sim_1`, and subsequent keys. Model `.pt` files store weights, and matching `.txt` files contain training logs. Experiment data in `GNN/data/`, model checkpoints, and `Figures/` are ignored by Git. Keep local copies or share these artifacts separately; existing historical commits may still contain data. Generated results in `analysis/results/` are also ignored by Git and kept locally.
+The round count follows `run.py`. HDF5 files store serialized NetworkX graphs under `sim_0`, `sim_1`, and subsequent keys. New initial datasets record `design_group_size=5` in their HDF5 attributes; older datasets without that attribute retain their two-sample grouping. `initial_samples.csv` labels the consecutive samples `design`, `ITM_plus`, `ITM_minus`, `ETM_plus`, and `ETM_minus`. MLP checkpoints also persist the initial group size for validation during fine-tuning. Model `.pt` files store weights, and matching `.txt` files contain training logs. Experiment data in `GNN/data/`, model checkpoints, and `Figures/` are ignored by Git. Keep local copies or share these artifacts separately; existing historical commits may still contain data. Generated results in `analysis/results/` are also ignored by Git and kept locally.
 
 Every new run writes `README.md` alongside `metadata.json` in `<SURROGATE_TYPE>/data/runN/`, before data generation. The README provides a readable snapshot of the run's purpose, settings, output paths, code revision, and software versions. Set the optional `RUN_NOTES` string in `run.py` to describe what you are trying or what changed from an earlier run. These notes are saved in both files. Existing runs are not modified.
 

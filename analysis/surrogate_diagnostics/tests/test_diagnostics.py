@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from MLP.checkpoint import load_checkpoint
-from analysis.surrogate_diagnostics.dataset import load_groups, load_splits, pack, REPO_ROOT
+from analysis.surrogate_diagnostics.dataset import DIRECTIONS, load_groups, load_splits, pack, REPO_ROOT
 from analysis.surrogate_diagnostics.evaluate import predictions
 from analysis.surrogate_diagnostics.tiny_fit import model_fingerprint, paired_loss, run_experiment
 
@@ -30,6 +30,24 @@ def write_round(path, offset=0, powers=(20., 21., 19., 24., 17.)):
             graph.add_node("ETM.p1.i", Rc=geometry[i][1], pd=1.)
             graph.add_node("ITM.p2.i", pd=powers[i])
             handle.create_dataset(f"sim_{i}", data=np.void(pickle.dumps(graph)))
+
+
+def write_base(path, group_count=2, group_size=5, include_metadata=True):
+    with h5py.File(path, "w") as handle:
+        if include_metadata:
+            handle.attrs["design_group_size"] = group_size
+        for group_id in range(group_count):
+            itm, etm = -1900. - 50 * group_id, 2200. + 50 * group_id
+            geometry = ([(itm, etm), (itm - 6, etm + 7)] if group_size == 2 else
+                        [(itm, etm), (itm + 6, etm), (itm - 6, etm),
+                         (itm, etm + 7), (itm, etm - 7)])
+            for offset, (itm_roc, etm_roc) in enumerate(geometry):
+                graph = nx.DiGraph()
+                graph.add_node("ITM.p1.i", Rc=itm_roc, q_re=-1000., q_im=400., pd=1.)
+                graph.add_node("ETM.p1.i", Rc=etm_roc, pd=1.)
+                graph.add_node("ITM.p2.i", pd=20. + offset)
+                handle.create_dataset(f"sim_{group_size * group_id + offset}",
+                                      data=np.void(pickle.dumps(graph)))
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -57,6 +75,77 @@ class DiagnosticTests(unittest.TestCase):
         torch.testing.assert_close(y[:5].expm1().flatten(), torch.tensor([20., 21., 19., 24., 17.], dtype=torch.float64))
         self.assertTrue(all(g.valid_fixed_q for g in groups))
         self.assertEqual(list(groups[0].records())[-1]["direction"], "ETM_minus")
+
+    def test_five_row_initial_data_counts_and_selection(self):
+        write_base(self.root / "base_500.h5", group_count=100)
+        groups = load_groups(self.config, {"base_ids": "all"})
+        self.assertEqual(len(groups), 100)
+        self.assertEqual(sum(len(group.x) for group in groups), 500)
+        self.assertEqual(groups[-1].group_id, "base:99")
+        self.assertTrue(all(group.directions == DIRECTIONS for group in groups))
+        selected = load_groups(self.config, {"base_id_range": [98, 100]})
+        self.assertEqual([group.group_id for group in selected], ["base:98", "base:99"])
+        self.assertEqual(selected[-1].keys, [f"sim_{i}" for i in range(495, 500)])
+        x, y, nominal, partners = pack(selected)
+        self.assertEqual(x.shape, (10, 4))
+        self.assertEqual(nominal.tolist(), [0, 0, 0, 0, 5, 5, 5, 5])
+        self.assertEqual(partners.tolist(), [1, 2, 3, 4, 6, 7, 8, 9])
+        torch.testing.assert_close(y[:5].expm1().flatten(),
+                                   torch.arange(20., 25., dtype=torch.float64))
+        records = list(selected[-1].records())
+        self.assertEqual([row["direction"] for row in records], list(DIRECTIONS))
+        self.assertEqual([(row["delta_itm_roc"], row["delta_etm_roc"]) for row in records],
+                         [(0., 0.), (6., 0.), (-6., 0.), (0., 7.), (0., -7.)])
+        with self.assertRaisesRegex(ValueError, "Invalid base group ID"):
+            load_groups(self.config, {"base_ids": [100]})
+
+    def test_legacy_initial_pairs_with_and_without_metadata(self):
+        path = self.root / "base_4.h5"
+        for include_metadata in (False, True):
+            with self.subTest(include_metadata=include_metadata):
+                write_base(path, group_size=2, include_metadata=include_metadata)
+                groups = load_groups(self.config, {"base_ids": "all"})
+                self.assertEqual([group.group_id for group in groups], ["base:0", "base:1"])
+                self.assertTrue(all(group.directions == ("nominal", "joint") for group in groups))
+                selected = load_groups(self.config, {"base_ids": [1]})[0]
+                self.assertEqual(selected.keys, ["sim_2", "sim_3"])
+                records = list(selected.records())
+                self.assertEqual(records[1]["direction"], "joint")
+                self.assertEqual(records[1]["delta_itm_roc"], -6.)
+                self.assertEqual(records[1]["delta_etm_roc"], 7.)
+                self.assertAlmostEqual(records[1]["delta_power"], 1.)
+                _, _, nominal, partners = pack(groups)
+                self.assertEqual(nominal.tolist(), [0, 2])
+                self.assertEqual(partners.tolist(), [1, 3])
+
+    def test_five_row_initial_direction_corruption_rejected(self):
+        path = self.root / "base_10.h5"
+        for corruption in ("wrong_sign", "other_mirror_changed"):
+            with self.subTest(corruption=corruption):
+                write_base(path)
+                with h5py.File(path, "a") as handle:
+                    graph = pickle.loads(bytes(handle["sim_1"][()]))
+                    if corruption == "wrong_sign":
+                        graph.nodes["ITM.p1.i"]["Rc"] = -1906.
+                    else:
+                        graph.nodes["ETM.p1.i"]["Rc"] = 2207.
+                    del handle["sim_1"]
+                    handle.create_dataset("sim_1", data=np.void(pickle.dumps(graph)))
+                with self.assertRaisesRegex(ValueError, "perturbation order"):
+                    load_groups(self.config, {"base_ids": "all"})
+
+    def test_initial_incomplete_and_unsupported_group_layouts_rejected(self):
+        path = self.root / "base_10.h5"
+        write_base(path)
+        with h5py.File(path, "a") as handle:
+            del handle["sim_9"]
+        with self.assertRaisesRegex(ValueError, "complete nominal"):
+            load_groups(self.config, {"base_ids": "all"})
+        write_base(path)
+        with h5py.File(path, "a") as handle:
+            handle.attrs["design_group_size"] = 3
+        with self.assertRaisesRegex(ValueError, "Unsupported base design group size"):
+            load_groups(self.config, {"base_ids": "all"})
 
     def test_duplicate_geometry_and_group_leakage_rejected(self):
         self.config["splits"] = {"train": {"rounds": [1]}, "test": {"rounds": [1]}}

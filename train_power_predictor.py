@@ -19,6 +19,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.data import Dataset
 
 from GNN.power_predictor import build_power_predictor
+from utils.training_groups import read_design_group_size, split_design_indices
 
 class PowerDataset(Dataset):
     def __init__(self, data_files, max_size = None, transform=None, pre_transform=None):
@@ -53,37 +54,12 @@ class PowerDataset(Dataset):
         return data
 
 
-def split_graph_pairs(dataset, train_fraction=0.8, seed=9302):
-    """Split consecutive design/perturbation graph pairs without pair leakage."""
-    dataset_size = len(dataset)
-    if dataset_size < 4 or dataset_size % 2:
-        raise ValueError(
-            'Pair-aware splitting requires an even dataset with at least 4 graphs; '
-            f'found {dataset_size}.'
-        )
-    if not 0 < train_fraction < 1:
-        raise ValueError(f'train_fraction must be between 0 and 1; got {train_fraction}.')
-
-    pair_count = dataset_size // 2
-    train_pair_count = min(pair_count - 1, max(1, int(train_fraction * pair_count)))
-    pair_order = torch.randperm(
-        pair_count,
-        generator=torch.Generator().manual_seed(seed),
-    ).tolist()
-    train_pairs = pair_order[:train_pair_count]
-    val_pairs = pair_order[train_pair_count:]
-
-    def graph_indices(pair_indices):
-        return [
-            index
-            for pair_index in pair_indices
-            for index in (2 * pair_index, 2 * pair_index + 1)
-        ]
-
-    return (
-        Subset(dataset, graph_indices(train_pairs)),
-        Subset(dataset, graph_indices(val_pairs)),
+def split_graph_pairs(dataset, train_fraction=0.8, seed=9302, *, group_size=2):
+    """Split complete designs; the legacy function name defaults to graph pairs."""
+    train_indices, validation_indices = split_design_indices(
+        len(dataset), train_fraction, seed, group_size=group_size,
     )
+    return Subset(dataset, train_indices), Subset(dataset, validation_indices)
 
 
 def crit(prediction, target):
@@ -175,28 +151,14 @@ def train_base_power_predictor(
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     dataset = PowerDataset(data_files=[dataset_path])
 
-    dataset_size = len(dataset)
-    if dataset_size < 2:
-        raise ValueError(f'Base training requires at least 2 graphs; found {dataset_size}.')
-    if dataset_size == 2:
-        # A two-graph bootstrap set is one design plus its fixed-q perturbation. An
-        # 80/20 split would train on only one graph,
-        # so the q-mismatch graph could be validation-only and contribute no gradient.
-        # Use both graphs for training. Reusing them for checkpoint monitoring is not
-        # an unbiased validation estimate, but no meaningful holdout is possible with
-        # two samples; later Finesse rounds provide independent feedback data.
-        data_train = dataset
-        data_val = dataset
-        print(
-            "Two-graph bootstrap dataset: using both design and perturbed graphs "
-            "for training and checkpoint monitoring."
-        )
-    else:
-        data_train, data_val = split_graph_pairs(dataset, train_fraction=0.8, seed=9302)
-        print(
-            f'Pair-aware split: {len(data_train)} training graphs and '
-            f'{len(data_val)} validation graphs.'
-        )
+    group_size = read_design_group_size(dataset_path)
+    data_train, data_val = split_graph_pairs(
+        dataset, train_fraction=0.8, seed=9302, group_size=group_size,
+    )
+    print(
+        f'Design-group split ({group_size} graphs per design): {len(data_train)} training '
+        f'graphs and {len(data_val)} checkpoint-monitoring graphs.'
+    )
     print("Loaded base dataset. Beginning initial training.")
 
     model = build_power_predictor(
@@ -219,7 +181,6 @@ def train_base_power_predictor(
 
 if __name__ == '__main__':
     train_base_power_predictor(
-        dataset_path='GNN/data/run6/base_10.h5',
-        checkpoint_path='GNN/models/run6/base_10_gat10_kan5.pt',
+        dataset_path='GNN/data/run6/base_25.h5',
+        checkpoint_path='GNN/models/run6/base_25_gat10_kan5.pt',
     )
-

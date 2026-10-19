@@ -30,7 +30,9 @@ FULL_COST_CSV = (
 )
 
 
-def _record_full_cost(C_power, C_perturb, C_total, nominal_power, Delta, pd_name):
+def _record_full_cost(
+    C_power, C_perturb, C_total, nominal_power, Delta, pd_name, *, full_cost_csv=None,
+):
     """Append one full-cost evaluation; preserve invalid costs as 'inf'."""
     if not RECORD_FULL_COST:
         return
@@ -49,8 +51,9 @@ def _record_full_cost(C_power, C_perturb, C_total, nominal_power, Delta, pd_name
         "weighted_perturbation_cost": FULL_PERTURBATION_WEIGHT * C_perturb,
         "total_cost": C_total,
     }
-    FULL_COST_CSV.parent.mkdir(parents=True, exist_ok=True)
-    with FULL_COST_CSV.open("a", newline="") as stream:
+    output_path = FULL_COST_CSV if full_cost_csv is None else Path(full_cost_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("a", newline="") as stream:
         # Prevent concurrent workers from duplicating the header/interleaving rows.
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         stream.seek(0, os.SEEK_END)
@@ -148,7 +151,11 @@ def cal_D_power_cost(ITM_powers, ITM_names,pd_name):
     # Higher power is better, so the cost is simply the inverse of the power.
     return float(1.0 / out_power_D)
 
-def calc_cost(kat, ITM_powers, ETM_powers, ITM_names, ETM_names, Delta, pd_name):
+def calc_cost(
+    kat, ITM_powers, ETM_powers, ITM_names, ETM_names, Delta, pd_name,
+    *, full_cost_csv=None,
+):
+    """Calculate the selected objective, optionally recording full cost to a chosen CSV."""
 
     # Unpack the ITM and ETM powers and names, as well as the Delta values
     ITM_ROC_delta, ETM_ROC_delta = Delta
@@ -178,6 +185,7 @@ def calc_cost(kat, ITM_powers, ETM_powers, ITM_names, ETM_names, Delta, pd_name)
                 C_power, C_perturb, C_total,
                 _get_power_for_pd_name(pd_name, ITM_names[1], ITM_powers[1]),
                 Delta, pd_name,
+                full_cost_csv=full_cost_csv,
             )
         return C_total
 

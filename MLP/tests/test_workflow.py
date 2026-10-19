@@ -29,14 +29,16 @@ DETECTOR = "p_ITM_p2_i"
 SMALL_MODEL = {"hidden_sizes": [8, 8]}
 
 
-def write_graphs(path, count, *, offset=0):
+def write_graphs(path, count, *, offset=0, group_size=None):
     """Write the same graph format as the real simulator, with known answers.
 
     Insertion order is deliberately reversed. HDF5's default iteration is also
-    alphabetical (sim_10 before sim_2), so correct pair splitting requires the
+    alphabetical (sim_10 before sim_2), so correct group splitting requires the
     loader to explicitly recover the numeric simulation order.
     """
     with h5py.File(path, "w") as handle:
+        if group_size is not None:
+            handle.attrs['design_group_size'] = group_size
         for index in reversed(range(count)):
             value = float(offset + index)
             graph = nx.DiGraph()
@@ -114,6 +116,12 @@ class DataAndCheckpointTests(CPUTestCase):
 
 class TrainingTests(CPUTestCase):
     def test_base_and_two_rounds_keep_holdout_and_normalization(self):
+        self.check_base_and_two_rounds(group_size=None, design_count=6)
+
+    def test_five_sample_groups_keep_holdout_and_normalization_across_rounds(self):
+        self.check_base_and_two_rounds(group_size=5, design_count=5)
+
+    def check_base_and_two_rounds(self, *, group_size, design_count):
         from MLP.finetune import run_finetune
         from MLP.training import train_base_power_predictor
 
@@ -124,9 +132,11 @@ class TrainingTests(CPUTestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(torch.cuda, "is_available", return_value=False):
             root = Path(directory)
-            base_data = root / "base_12.h5"
+            effective_group_size = group_size or 2
+            sample_count = effective_group_size * design_count
+            base_data = root / f"base_{sample_count}.h5"
             base_checkpoint = root / "base.pt"
-            write_graphs(base_data, 12)
+            write_graphs(base_data, sample_count, group_size=group_size)
             # Five rows represent a nominal design and its four perturbations.
             write_graphs(root / "round1.h5", 5, offset=100)
             write_graphs(root / "round2.h5", 5, offset=200)
@@ -144,10 +154,13 @@ class TrainingTests(CPUTestCase):
             self.assertTrue(training)
             self.assertTrue(validation)
             self.assertFalse(training & validation)
-            self.assertEqual(training | validation, set(range(12)))
-            for pair_start in range(0, 12, 2):
-                pair = {pair_start, pair_start + 1}
-                self.assertTrue(pair <= training or pair <= validation)
+            self.assertEqual(training | validation, set(range(sample_count)))
+            self.assertEqual(metadata['base_group_size'], effective_group_size)
+            self.assertEqual(metadata['validation_mode'],
+                             'held_out_pairs' if effective_group_size == 2 else 'held_out_designs')
+            for start in range(0, sample_count, effective_group_size):
+                group = set(range(start, start + effective_group_size))
+                self.assertTrue(group <= training or group <= validation)
 
             dataset = PowerDataset(base_data, DETECTOR)
             training_inputs = dataset.x[train_indices]
@@ -172,7 +185,8 @@ class TrainingTests(CPUTestCase):
                 self.assertEqual(latest["validation_indices"], validation_indices)
                 self.assertEqual(latest["current_round"], round_number)
                 self.assertEqual(latest["newest_round_count"], 5)
-                self.assertEqual(latest["newest_round_weight"], 12 / 5)
+                self.assertEqual(latest["newest_round_weight"], sample_count / 5)
+                self.assertEqual(latest['base_group_size'], effective_group_size)
                 self.assertEqual(latest["training_row_count"], len(training) + 5 * round_number)
                 self.assertEqual(
                     latest["round_data_counts"],
@@ -181,6 +195,50 @@ class TrainingTests(CPUTestCase):
                 self.assertTrue(np.isfinite(latest["best_validation_loss"]))
                 torch.testing.assert_close(model.input_mean, base_model.input_mean, rtol=0, atol=0)
                 torch.testing.assert_close(model.input_scale, base_model.input_scale, rtol=0, atol=0)
+
+    def test_single_five_sample_design_trains_and_finetunes_without_holdout(self):
+        from MLP.finetune import run_finetune
+        from MLP.training import train_base_power_predictor
+
+        settings = {'n_epochs': 1, 'batch_size': 5}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(torch.cuda, 'is_available', return_value=False):
+            root = Path(directory)
+            write_graphs(root / 'base_5.h5', 5, group_size=5)
+            write_graphs(root / 'round1.h5', 5, offset=100)
+            with self.assertWarnsRegex(UserWarning, 'Single-design bootstrap'):
+                train_base_power_predictor(
+                    root / 'base_5.h5', root / 'base.pt', hyperparams=settings,
+                    detector=DETECTOR, model_config=SMALL_MODEL,
+                )
+            with self.assertWarnsRegex(UserWarning, 'Single-design bootstrap'):
+                prefix = run_finetune(
+                    data_dir=root, base_checkpoint_path=root / 'base.pt',
+                    checkpoint_template=str(root / 'round{}'), current_round=1,
+                    hyperparams=settings,
+                )
+            _, payload = load_checkpoint(f'{prefix}.pt', device='cpu')
+            metadata = payload['training_metadata']
+            self.assertEqual(metadata['validation_mode'], 'training_monitor_only')
+            self.assertEqual(metadata['train_indices'], list(range(5)))
+            self.assertEqual(metadata['validation_indices'], list(range(5)))
+            self.assertEqual(metadata['training_row_count'], 10)
+
+    def test_restored_splits_reject_design_leakage_and_accept_legacy_pairs(self):
+        from MLP.finetune import _restore_base_split
+
+        metadata = dict(base_group_size=5, validation_mode='held_out_designs',
+                        train_indices=list(range(5)), validation_indices=list(range(5, 10)))
+        self.assertEqual(_restore_base_split(metadata, 10),
+                         (metadata['train_indices'], metadata['validation_indices']))
+        # Still a disjoint partition of all rows, but the first design is split.
+        leaked = {**metadata, 'train_indices': [0, 1, 2, 3, 5],
+                  'validation_indices': [4, 6, 7, 8, 9]}
+        with self.assertRaisesRegex(ValueError, 'design group'):
+            _restore_base_split(leaked, 10)
+        legacy = dict(validation_mode='held_out_pairs', train_indices=[0, 1],
+                      validation_indices=[2, 3])
+        self.assertEqual(_restore_base_split(legacy, 4), ([0, 1], [2, 3]))
 
 
 class PredictorIntegrationTests(CPUTestCase):

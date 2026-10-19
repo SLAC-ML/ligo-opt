@@ -14,7 +14,7 @@ from torch.nn import functional as F
 from MLP.checkpoint import load_checkpoint
 from MLP.data import PowerDataset
 from MLP.finetune import run_finetune
-from MLP.losses import PowerPredictionLoss, resolve_loss_config
+from MLP.losses import PowerPredictionLoss, resolve_loss_config, signed_delta_losses
 from MLP.tests.test_workflow import DETECTOR, SMALL_MODEL, write_graphs
 from MLP.training import train_base_power_predictor
 
@@ -98,6 +98,107 @@ class CenterLossTests(unittest.TestCase):
             np.testing.assert_allclose(torch.expm1(dataset.y).numpy().ravel(), powers, rtol=0, atol=1e-10)
             self.assertNotEqual(dataset.y[0].item(), dataset.y[1].item())
             self.assertEqual(dataset.y.float()[0].item(), dataset.y.float()[1].item())
+
+
+class SignedDeltaLossTests(unittest.TestCase):
+    def test_unreduced_losses_follow_signed_watt_errors_and_fixed_scale(self):
+        loss = signed_delta_losses(
+            log_power([13., 6., 11.]), log_power([12., 8., 10.]),
+            log_power([9., 11., 10.]), log_power([10., 10., 10.]), 2.,
+        )
+        # Signed response errors are [2, -3, 1] W; normalized by 2 W.
+        torch.testing.assert_close(loss, torch.tensor([0.5, 1., 0.125], dtype=torch.float64))
+        self.assertEqual(loss.shape, (3,))
+        self.assertEqual(loss.dtype, torch.float64)
+
+    def test_reversed_response_signs_are_penalized(self):
+        target, nominal = log_power([12., 8.]), log_power([10., 10.])
+        exact = signed_delta_losses(target, target, nominal, nominal, 1.)
+        wrong = signed_delta_losses(log_power([8., 12.]), target, nominal, nominal, 1.)
+        torch.testing.assert_close(exact, torch.zeros(2, dtype=torch.float64))
+        torch.testing.assert_close(wrong, torch.full((2,), 3.5, dtype=torch.float64))
+
+    def test_common_watt_offset_preserves_differences(self):
+        loss = signed_delta_losses(
+            log_power([17., 13., 15.]), log_power([12., 8., 10.]),
+            log_power([15., 15., 15.]), log_power([10., 10., 10.]), 1.,
+        )
+        torch.testing.assert_close(loss, torch.zeros(3, dtype=torch.float64), rtol=0, atol=1e-25)
+
+    def test_gradients_reach_partner_and_nominal_predictions(self):
+        predicted = log_power([12.]).float().requires_grad_()
+        nominal = log_power([10.]).float().requires_grad_()
+        loss = signed_delta_losses(predicted, log_power([13.]), nominal, log_power([10.]), 2.)
+        loss.sum().backward()
+        self.assertEqual(predicted.grad.dtype, torch.float32)
+        self.assertTrue(torch.isfinite(predicted.grad).all())
+        self.assertTrue(torch.isfinite(nominal.grad).all())
+        self.assertLess(predicted.grad.item(), 0.)
+        self.assertGreater(nominal.grad.item(), 0.)
+
+    def test_zero_and_tiny_true_differences_remain_resolvable(self):
+        nominal = log_power([0., 282.0955])
+        target = log_power([0., 282.095501])
+        exact = signed_delta_losses(target, target, nominal, nominal, 1.)
+        flat = signed_delta_losses(nominal, target, nominal, nominal, 1.)
+        torch.testing.assert_close(exact, torch.zeros(2, dtype=torch.float64))
+        self.assertEqual(flat[0].item(), 0.)
+        self.assertGreater(flat[1].item(), 0.)
+
+    def test_invalid_shapes_and_dtypes_fail_before_broadcasting(self):
+        reference = log_power([10., 11.])
+        for invalid in (reference.flatten(), reference[:1], reference.expand(2, 2),
+                        reference.long(), reference.cdouble(), [10., 11.]):
+            for position in range(4):
+                arguments = [reference] * 4
+                arguments[position] = invalid
+                with self.subTest(position=position, invalid=str(invalid)), self.assertRaises(ValueError):
+                    signed_delta_losses(*arguments, 1.)
+
+    def test_invalid_scale_is_rejected(self):
+        reference = log_power([10.])
+        for invalid in (0., -1., True, float('nan'), float('inf'), '1'):
+            with self.subTest(scale=invalid), self.assertRaises(ValueError):
+                signed_delta_losses(reference, reference, reference, reference, invalid)
+
+    def test_nonfinite_inputs_conversion_and_scaled_errors_fail_clearly(self):
+        reference = log_power([10.])
+        for invalid in (float('nan'), float('inf'), -float('inf'), 1000.):
+            for position in range(4):
+                arguments = [reference] * 4
+                arguments[position] = torch.tensor([[invalid]], dtype=torch.float64)
+                with self.subTest(position=position, value=invalid), self.assertRaises(FloatingPointError):
+                    signed_delta_losses(*arguments, 1.)
+        with self.assertRaises(FloatingPointError):
+            signed_delta_losses(log_power([12.]), reference, reference, reference, 1e-320)
+
+
+class DeltaConfigurationTests(unittest.TestCase):
+    def test_old_config_defaults_to_row_supervision(self):
+        config = resolve_loss_config({'mode': 'log_smooth_l1'})
+        self.assertEqual(config['supervision'], 'row_power')
+        self.assertEqual(config['delta_weight'], 1.)
+        self.assertEqual(config['delta_scale_floor_w'], 1.)
+        config['delta_weight'] = 7.
+        self.assertEqual(resolve_loss_config()['delta_weight'], 1.)
+
+    def test_delta_config_leaves_base_row_criterion_unchanged(self):
+        prediction, target = log_power([282.0945, 10.]), log_power([282.0955, 11.])
+        expected = PowerPredictionLoss()(prediction, target)
+        actual = PowerPredictionLoss({
+            'supervision': 'nominal_delta', 'delta_weight': 0., 'delta_scale_floor_w': .01,
+        })(prediction, target)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_invalid_delta_settings_fail_early(self):
+        for invalid in ({'supervision': 'paired'}, {'supervision': True},
+                        {'delta_weight': -1.}, {'delta_weight': True},
+                        {'delta_weight': float('nan')}, {'delta_weight': float('inf')},
+                        {'delta_scale_floor_w': 0.}, {'delta_scale_floor_w': -1.},
+                        {'delta_scale_floor_w': True}, {'delta_scale_floor_w': '1'},
+                        {'delta_scale_floor_w': float('nan')}, {'delta_scale_floor_w': float('inf')}):
+            with self.subTest(config=invalid), self.assertRaises(ValueError):
+                resolve_loss_config(invalid)
 
 
 class LossPersistenceTests(unittest.TestCase):

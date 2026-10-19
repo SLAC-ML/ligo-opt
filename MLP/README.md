@@ -40,7 +40,7 @@ Read the files in this order:
 | --- | --- |
 | [`data.py`](data.py) | Turns each saved Finesse graph into four input numbers and one target |
 | [`model.py`](model.py) | Defines the layers, activations, and input standardization |
-| [`losses.py`](losses.py) | Gives extra attention to small errors near the central power plateau |
+| [`losses.py`](losses.py) | Combines nominal-power accuracy with signed perturbation differences |
 | [`training.py`](training.py) | Splits examples, calculates loss, updates weights, saves the best checkpoint |
 | [`checkpoint.py`](checkpoint.py) | Saves weights together with scaling, architecture, and detector information |
 | [`predictor.py`](predictor.py) | Loads a model and converts its output into powers for PSO |
@@ -113,21 +113,22 @@ so loading a trained model does not depend on later changes to the defaults.
 ## 5. Understand training and feedback
 
 A **batch** is a group of examples used for one weight update. An **epoch** visits
-the training data once. The **loss** measures the difference between predicted
-and simulated log-powers. Backpropagation calculates how each weight contributed
+the training data once. The **loss** measures nominal-power error and errors in
+the signed power changes caused by mirror perturbations. Backpropagation calculates how each weight contributed
 to the loss; AdamW uses that information to update the weights. The **learning
 rate** controls the update size, and **weight decay** discourages large weights.
 
-Initial nominal/perturbed pairs stay together when splitting training and
-validation data. Validation examples do not update the weights or input scaling.
-The best monitored validation checkpoint is saved. With only one initial pair,
-both examples are used for training and monitoring; that monitoring loss is not
-an independent accuracy estimate.
+Each initial design and its four single-mirror perturbations stay together when
+splitting training and validation data. Validation examples do not update the
+weights or input scaling. The best monitored validation checkpoint is saved.
+With only one initial design, all five examples are used for training and
+monitoring; that monitoring loss is not an independent accuracy estimate.
+Older datasets without group metadata continue to use nominal/perturbed pairs.
 
 After a PSO search, real Finesse supplies one new nominal example and four fixed-q
 perturbations (one example in nominal-only mode). Fine-tuning starts from the
 previous checkpoint and trains on every new example plus historical training
-examples. The original held-out base pairs stay held out across rounds. Input
+examples. The original held-out base designs stay held out across rounds. Input
 scaling stays fixed too. Automatic newest-data weighting uses
 `max(1, initial_sample_count / newest_sample_count)` so a small feedback batch
 has a useful contribution alongside the older data.
@@ -136,7 +137,7 @@ The checkpoint keeps the detector, feature order, model configuration, normaliza
 buffers, and training split information alongside the learned weights. A checkpoint
 for one detector is rejected if PSO asks for another detector.
 
-## 6. Learn the central power plateau more accurately
+## 6. Learn nominal power and signed perturbation differences
 
 The Finesse map displays a narrow range, approximately 282.09 to 282.0956.
 The saved map also contains much lower powers: the dark color clips values below
@@ -147,17 +148,49 @@ which examples belong near the bright plateau.
 
 ```python
 MLP_LOSS_CONFIG = {
-    'mode': 'center_focused',   # 'log_smooth_l1' selects the original loss.
+    'supervision': 'nominal_delta',  # 'row_power' restores all-row power supervision.
+    'mode': 'center_focused',   # 'log_smooth_l1' selects the ordinary power criterion.
     'center_power': 282.09,    # Approximate location of the interesting power band.
     'center_width': 0.01,      # Smooth emphasis falls away outside this band.
     'center_error_scale': 0.001,  # Scale of power errors to pay close attention to.
     'center_weight': 10.0,     # Strength of the extra center term.
+    'delta_weight': 1.0,       # Strength of signed perturbation supervision.
+    'delta_scale_floor_w': 1.0,  # Minimum fixed delta scale, in watts.
 }
 ```
 
+`supervision` selects which predictions the loss supervises; `mode` selects the
+power criterion. For each design, let $P_0$ be the nominal power and
+$\Delta P_d=P_d-P_0$ for each of ITM+, ITM−, ETM+, and ETM−. The new training loss is
+
+$$
+L=L_{\mathrm{power}}(\hat P_0,P_0)
++\frac{\lambda_\Delta}{4}\sum_d
+S_1\!\left(\frac{(\hat P_d-\hat P_0)-(P_d-P_0)}{s_\Delta}\right),
+\qquad
+s_\Delta=\max\!\left(1\,\mathrm{W},\operatorname{RMS}_{\mathrm{initial\ train}}(\Delta P)\right).
+$$
+
+The differences are signed and calculated in watts after converting predicted
+log-powers to float64. Gradients flow through both nominal and perturbed
+predictions. The fixed scale makes the delta error relative to the initial
+training data's typical response, without giving nearly zero differences extra
+weight. It is stored as `training_metadata['delta_scale_w']` in the checkpoint
+and remains fixed during feedback fine-tuning. Validation data do not determine it.
+The scale floor affects its initial calculation only.
+
+The architecture, saved dataset, splits, input scaling, shuffled row batches,
+optimizer, epoch count, and feedback weights remain unchanged. Each existing
+update obtains any needed nominal-reference predictions for its perturbed rows.
+The newest-feedback weights apply once to each loss contribution. Setting
+`delta_weight=0` leaves nominal-only power supervision; select
+`supervision='row_power'` to recover the previous all-row power objective.
+
+The nominal power criterion retains the center-focused loss described below.
+
 For one sample, let $e=\hat y-\log(1+P)$, where $P$ is its actual Finesse power.
 Let $S_\beta(e)$ denote Smooth-L1: $e^2/(2\beta)$ for $|e|<\beta$, and
-$|e|-\beta/2$ otherwise. The new loss is
+$|e|-\beta/2$ otherwise. The power criterion is
 
 $$
 L_i=S_1(e_i)+\alpha\,w(P_i)\,S_{\beta_c}(e_i),\qquad
@@ -166,9 +199,11 @@ $$
 
 with $P_c=282.09$, $b=0.01$, $\alpha=10$, and
 $\beta_c=\log(1+s/(1+P_c))$ for $s=0.001$. This converts the requested power-error
-scale into the network's log-power units. Training then averages these per-example
-losses with the usual newest-feedback weights. Validation uses the same loss with
-unit feedback weights, so checkpoint selection also values the center region.
+scale into the network's log-power units. With `supervision='nominal_delta'`,
+this criterion applies only to nominal predictions during training. With
+`supervision='row_power'`, training averages it over all rows as before.
+Checkpoint selection retains the existing all-row power criterion with unit
+feedback weights, so the comparison changes only the training loss.
 
 The first term still teaches the overall curve. The extra term makes tiny errors
 near the plateau produce a useful training signal, while its slope remains bounded
@@ -183,12 +218,15 @@ accuracy. The model remains float32; targets and loss arithmetic use float64 so
 rounding the training labels does not discard tiny power differences. Resolving
 much finer details may also require more data or a different output representation.
 
-Every checkpoint/log now includes overall **power MAE** and **center power MAE**
+Every checkpoint/log includes overall **power MAE** and **center power MAE**
 (mean absolute error, in the same units as power). For reporting, center examples
 satisfy `abs(true_power - center_power) <= center_width`. If no validation examples
 fall in the band, center MAE is `None`, rather than a misleading zero. Both base
 training and fine-tuning keep these metrics in `training_metadata['history']` and
 `training_metadata['best_power_metrics']`, and save the resolved loss configuration.
+The signed-difference experiment also logs nominal-power MAE, delta MAE by
+direction, significant-sign accuracy with counts, and perturbation-cost error.
+These diagnostics do not change checkpoint selection.
 
 Optimization, MLP training defaults, and the subspace analysis share
 `POWER_DETECTOR = "p_ITM_p2_i"` from `utils/detectors.py`. The notebook rejects
@@ -198,14 +236,17 @@ New Finesse/GNN map filenames include the detector so older results are preserve
 If the detector or physical settings change, check that the reference band remains
 appropriate and that the validation set actually contains center examples.
 
-New training uses this loss automatically. Use a fresh `RUN_NUMBER`, since existing
+New runs launched through `run.py` select `nominal_delta` for both base training
+and feedback. Use a fresh `RUN_NUMBER`, since existing
 run artifacts are protected. Existing checkpoints remain usable for prediction,
 but do not gain better accuracy until trained further. Standalone fine-tuning
 inherits the checkpoint's loss unless explicitly overridden; older checkpoints
-without loss metadata retain their original loss by default. To opt an older
-checkpoint into this loss, pass `hyperparams={'loss': {'mode': 'center_focused'}}`
-alongside the other desired fine-tuning settings. A partial override preserves the
-checkpoint's remaining loss settings.
+without `supervision` metadata retain `row_power` by default. To opt an older
+checkpoint into signed-difference supervision, pass
+`hyperparams={'loss': {'supervision': 'nominal_delta', 'delta_weight': 1.0, 'delta_scale_floor_w': 1.0}}`
+alongside the other desired fine-tuning settings. A partial override preserves
+the checkpoint's remaining loss settings. Keep the comparison's original
+architecture and training settings fixed when evaluating the new loss.
 
 ## 7. Inspect results and check quality
 

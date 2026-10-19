@@ -1,0 +1,48 @@
+{
+  "mode": "tiny_fit",
+  "data_dir": "MLP/data/run3",
+  "detector": "p_ITM_p2_i",
+  "valid_fixed_q_only": true,
+  "initial_checkpoint": "MLP/models/run3/power_predictor_ligoParams_finetuned_round40.pt",
+  "normalization": "checkpoint",
+  "model_config": {
+    "hidden_sizes": [
+      64,
+      64
+    ]
+  },
+  "seeds": [
+    9302
+  ],
+  "losses": [
+    "center_focused",
+    "log_smooth_l1",
+    "paired"
+  ],
+  "epochs": 2000,
+  "record_every": 50,
+  "threads": 1,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0,
+  "delta_weight": 1.0,
+  "delta_scale_floor_w": 1.0,
+  "power_scale_floor_w": 1.0,
+  "sign_threshold_w": 0.1,
+  "center_loss": {
+    "center_power": 282.09,
+    "center_width": 0.01,
+    "center_error_scale": 0.001,
+    "center_weight": 10.0
+  },
+  "splits": {
+    "train": {
+      "rounds": [
+        1,
+        10,
+        20,
+        30,
+        40
+      ]
+    }
+  }
+}

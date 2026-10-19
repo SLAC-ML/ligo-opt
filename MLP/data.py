@@ -116,7 +116,7 @@ class PowerDataset(Dataset):
                 if any(re.fullmatch(r"sim_\d+", key) is None for key in keys):
                     raise ValueError(f"{path}: expected only sim_<number> graph entries.")
                 # Lexical sorting puts sim_10 before sim_2. Numeric sorting
-                # preserves adjacent nominal/perturbed pairs for data splitting.
+                # preserves consecutive design groups for data splitting.
                 keys.sort(key=lambda key: int(key.removeprefix("sim_")))
                 for key in keys:
                     try:

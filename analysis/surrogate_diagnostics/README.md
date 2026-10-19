@@ -7,6 +7,18 @@ run PSO, generate optical power simulations, or modify run 2 artifacts.
 
 See [FINDINGS.md](FINDINGS.md) for the first run 2 audit and one-group experiments.
 
+Open [results_overview_run2.ipynb](results_overview_run2.ipynb) or
+[results_overview_run3.ipynb](results_overview_run3.ipynb) for each run's saved
+results. [results_overview.ipynb](results_overview.ipynb) links to both reports.
+Run all cells with the Python kernel from the `ligoopt` environment to refresh
+audit plots, feature checks, metric comparisons, training curves, signed
+responses, perturbation costs, and complete result/provenance tables. Each
+notebook discovers new output folders for its run from saved configs and works
+from the repository root or its own directory. The run 3 report includes run 2
+checkpoints as reference baselines in the cross-run comparisons. Use the setup
+cell to filter experiments, select any feedback group, display every group
+response or saved figure, or export plots as PNG files.
+
 Run the commands below from the repository root. Paths in configs and CLI
 arguments are relative to the repository root, not the config file. Use the
 repository's Python environment exactly as shown. All output directories must
@@ -32,11 +44,13 @@ Reconstructed ROCs come from float32 training inputs, so inspect the reported
 errors and tolerances near stability boundaries before concluding that a
 discrepancy is a data bug. To check only a handful of examples, omit `--all-data`.
 
-The initial dataset contains consecutive nominal/joint-ROC-perturbation pairs.
-Feedback files contain nominal, ITM+, ITM−, ETM+, ETM− groups. The loader checks
-feedback direction ordering and never treats joint initial perturbations as
-individual-mirror responses. Invalid/zero-q groups are included in audits but
-excluded from fitting by default, with their IDs recorded in `provenance.json`.
+Historical initial datasets without group metadata contain consecutive
+nominal/joint-ROC-perturbation pairs. Run 3 records `design_group_size=5` and
+contains nominal, ITM+, ITM−, ETM+, ETM− groups, as do feedback files. The
+loader reads that metadata and checks direction ordering for every five-row
+group; it never treats joint initial perturbations as individual-mirror
+responses. Invalid/zero-q groups are included in audits but excluded from
+diagnostic fitting by default, with their IDs recorded in `provenance.json`.
 Zero output alone cannot distinguish instability from lock/solver failure in
 the existing files. A fixed-q ROC perturbation combines geometry and mismatch
 effects; these are not pure q-mismatch labels.
@@ -183,3 +197,80 @@ Focused verification:
 /home/xuesi.ma/.conda/envs/ligoopt/bin/python -m unittest discover \
   -s analysis/surrogate_diagnostics/tests -v
 ```
+
+## Run 3: inspect the changed initial sampling and actual PSO trajectory
+
+[RUN3_FINDINGS.md](RUN3_FINDINGS.md) explains the completed run 3 analysis.
+The initial dataset has 100 complete designs / 500 rows. Saved base checkpoint
+indices determine the original training and validation groups; unfiltered
+evaluations preserve the zero/invalid rows that production actually trained on.
+Separate valid-fixed-q metrics assess physically interpretable paired responses.
+
+The comparison command evaluates both runs' base and final checkpoints on the
+same run 3 feedback designs. It also reads the original captured online powers,
+reconstructs the saved full-cost components without writing production logs,
+checks that they reproduce the recorded costs, and plots the search trajectory.
+The training audit compares both base models on exactly the same initial designs,
+checks symmetric responses, and evaluates each saved feedback checkpoint before
+and after its matching update. These commands perform no training or optical
+power simulations:
+
+```bash
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python -m analysis.surrogate_diagnostics.compare_runs \
+  --run 3 --reference-run 2 \
+  --output analysis/surrogate_diagnostics/outputs/run3_comparison_new
+
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python -m analysis.surrogate_diagnostics.training_audit \
+  --run 3 --reference-run 2 \
+  --output analysis/surrogate_diagnostics/outputs/run3_training_audit_new
+
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python -m analysis.surrogate_diagnostics.audit_data \
+  --config analysis/surrogate_diagnostics/configs/run3_tiny_fit.json --all-data \
+  --output analysis/surrogate_diagnostics/outputs/run3_audit_new
+```
+
+For the controlled 25-row fitting diagnostic, `run3_tiny_fit.json` uses fresh
+weights and local scaling. `run3_tiny_fit_checkpoint.json` starts from the saved
+round-40 model and preserves its scaling. Within either experiment, all losses
+share the same initialization and settings. Both use seed 9302 and 2,000 epochs;
+these are fitting diagnostics, not global surrogate replacements:
+
+```bash
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python -m analysis.surrogate_diagnostics.tiny_fit \
+  --config analysis/surrogate_diagnostics/configs/run3_tiny_fit.json \
+  --output analysis/surrogate_diagnostics/outputs/run3_five_groups_fresh_new
+
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python -m analysis.surrogate_diagnostics.tiny_fit \
+  --config analysis/surrogate_diagnostics/configs/run3_tiny_fit_checkpoint.json \
+  --output analysis/surrogate_diagnostics/outputs/run3_five_groups_warm_new
+```
+
+`run3_five_groups_transfer.json` selects the other 35 saved feedback groups.
+Use it with `evaluate --checkpoint ... --config ... --output ...` to evaluate
+fresh diagnostic checkpoints without retraining. The saved transfer experiments
+show that fitting a small set well does not ensure sensible predictions at
+distant geometries. Final production checkpoints have already seen feedback
+labels; their feedback scores measure reconstruction, not independent accuracy.
+
+## Run 4: nominal/difference supervision and verified optimization
+
+Open [results_overview_run4.ipynb](results_overview_run4.ipynb) for the executed
+analysis or [RUN4_FINDINGS.html](RUN4_FINDINGS.html) for the self-contained overview.
+[RUN4_FINDINGS.md](RUN4_FINDINGS.md) is the source narrative. Run 3 is the reference
+baseline; matched initial-validation results, original online predictions, and final
+feedback replay are reported separately. Flat-response baselines and the difference
+between production `nominal_delta` and diagnostic `paired` losses are explicit.
+
+Saved artifacts live in `outputs/run4_*`. The three `configs/run4_*.json` files
+reproduce the five-group fitting and remaining-group transfer selections. Adapt the
+run 3 commands above to `--run 4 --reference-run 3` and the run 4 configs to regenerate
+the saved diagnostics in a new output directory. Refresh the report and notebook
+from existing artifacts without training or optical power solves:
+
+```bash
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python -m analysis.surrogate_diagnostics.build_run4_report
+/home/xuesi.ma/.conda/envs/ligoopt/bin/python analysis/surrogate_diagnostics/build_run4_notebook.py --execute
+```
+
+The HTML renderer uses local Pandoc and embeds its figures and linked CSV/JSON
+evidence. The notebook refresh uses IPython and the required `ligoopt` Python.

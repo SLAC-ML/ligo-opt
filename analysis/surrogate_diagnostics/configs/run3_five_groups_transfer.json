@@ -1,0 +1,79 @@
+{
+  "mode": "tiny_fit",
+  "data_dir": "MLP/data/run3",
+  "detector": "p_ITM_p2_i",
+  "valid_fixed_q_only": true,
+  "initial_checkpoint": null,
+  "normalization": "training",
+  "model_config": {
+    "hidden_sizes": [
+      64,
+      64
+    ]
+  },
+  "seeds": [
+    9302
+  ],
+  "losses": [
+    "center_focused",
+    "log_smooth_l1",
+    "paired"
+  ],
+  "epochs": 2000,
+  "record_every": 50,
+  "threads": 1,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0,
+  "delta_weight": 1.0,
+  "delta_scale_floor_w": 1.0,
+  "power_scale_floor_w": 1.0,
+  "sign_threshold_w": 0.1,
+  "center_loss": {
+    "center_power": 282.09,
+    "center_width": 0.01,
+    "center_error_scale": 0.001,
+    "center_weight": 10.0
+  },
+  "splits": {
+    "transfer": {
+      "rounds": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39
+      ]
+    }
+  },
+  "notes": "Fresh five-group checkpoints trained only on rounds1,10,20,30,40. These35different saved feedback groups assess transfer to correlated nearby designs; they are not spatial extrapolation or independent of the original data-collection policy."
+}
